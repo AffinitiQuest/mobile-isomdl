@@ -82,9 +82,11 @@ fn mdl_validate_inner<'a: 'b, 'b>(
         .map(ErrorWithContext::ds);
     outcome.errors.extend(ds_extension_errors);
 
+    println!("Document Signer {:#?}", document_signer);
     let mut trust_anchor_candidates =
         find_trust_anchor_candidates(document_signer, trust_anchors, TrustPurpose::Iaca);
-
+    
+    //println!("TAC: {#:?}", trust_anchor_candidates);
     let Some(iaca) = trust_anchor_candidates.next() else {
         outcome
             .errors
@@ -190,12 +192,17 @@ fn find_trust_anchor_candidates<'a: 'b, 'b>(
                 None
             }
         })
-        .filter(|candidate| candidate.tbs_certificate.subject == subject.tbs_certificate.issuer)
+        .filter(|candidate| {
+            println!("{:#?}", candidate.tbs_certificate.subject);
+            println!("{:#?}", subject.tbs_certificate.issuer);
+            candidate.tbs_certificate.subject == subject.tbs_certificate.issuer
+        })
         .filter(|candidate| {
             let valid = key_identifier_check(
                 candidate.tbs_certificate.extensions.iter().flatten(),
                 subject.tbs_certificate.extensions.iter().flatten(),
             );
+            println!("1: {:#?}", valid);
             if !valid {
                 tracing::warn!("key identifier extensions did not match");
             }
@@ -203,6 +210,7 @@ fn find_trust_anchor_candidates<'a: 'b, 'b>(
         })
         .filter(|candidate| {
             let valid = issuer_signed_subject(subject, candidate);
+            println!("2: {:#?}", valid);
             if !valid {
                 tracing::warn!("issuer did not sign subject");
             }
@@ -210,6 +218,7 @@ fn find_trust_anchor_candidates<'a: 'b, 'b>(
         })
         .filter(|candidate| {
             let errors = check_validity_period(candidate);
+            println!("3: {:#?}", errors);
             if !errors.is_empty() {
                 tracing::warn!("certificate is not valid: {errors:?}");
             }

@@ -42,6 +42,7 @@ pub struct Document {
     pub issuer_signed: IssuerSigned,
 
     /// An instance of the [DeviceSigned] struct representing the device-signed data.
+    #[serde(skip_serializing)]
     pub device_signed: DeviceSigned,
 
     /// An optional instance of the [Errors] struct representing any errors associated with the document.

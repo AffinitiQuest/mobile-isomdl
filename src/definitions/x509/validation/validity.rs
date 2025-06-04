@@ -2,6 +2,7 @@ use time::OffsetDateTime;
 use x509_cert::Certificate;
 
 pub fn check_validity_period(certificate: &Certificate) -> Vec<Error> {
+    println!("{:#?}", certificate);
     let validity = certificate.tbs_certificate.validity;
     let mut errors: Vec<Error> = vec![];
     if validity.not_after.to_unix_duration().as_secs()

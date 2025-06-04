@@ -16,6 +16,13 @@ pub fn validate(rules: RuleSet, signer: &[u8], root: &[u8]) -> Result<Vec<String
         purpose: TrustPurpose::Iaca,
     };
 
+    // let aqCert = Certificate::from_pem()?;
+
+    // let aq_trust = TrustAnchor {
+    //     certificate: aq_trust,
+    //     purpose: TrustPurpose::
+    // }
+
     let trust_anchor_registry = TrustAnchorRegistry {
         anchors: vec![trust_anchor],
     };

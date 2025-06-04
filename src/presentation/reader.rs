@@ -180,6 +180,7 @@ impl SessionManager {
     /// (using **Diffie–Hellman key exchange**).
     pub fn establish_session(
         qr_code: String,
+        docType: String,
         namespaces: device_request::Namespaces,
         trust_anchor_registry: TrustAnchorRegistry,
     ) -> Result<(Self, Vec<u8>, [u8; 16])> {
@@ -206,6 +207,9 @@ impl SessionManager {
             &e_reader_key_private.into(),
         )
         .context("failed to derive shared session secret")?;
+        let a = shared_secret.raw_secret_bytes().as_slice();
+        let mut shared_secret_hex_string = String::with_capacity(a.len() * 2);
+        //println!("Shared secret: {:#?}", a);
 
         let session_transcript = SessionTranscript180135(
             device_engagement_bytes,
@@ -234,7 +238,7 @@ impl SessionManager {
         };
 
         let request = session_manager
-            .build_request(namespaces)
+            .build_request(docType, namespaces)
             .context("failed to build device request")?;
         let session = SessionEstablishment {
             data: request.into(),
@@ -244,6 +248,25 @@ impl SessionManager {
             cbor::to_vec(&session).context("failed to encode session establishment")?;
 
         Ok((session_manager, session_request, ble_ident))
+    }
+
+    pub fn first_peripheral_server_uuid(&self) -> Option<&Uuid> {
+        self.session_transcript
+            .0
+            .as_ref()
+            .device_retrieval_methods
+            .as_ref()
+            .and_then(|ms| {
+                ms.as_ref()
+                    .iter()
+                    .filter_map(|m| match m {
+                        DeviceRetrievalMethod::BLE(opt) => {
+                            opt.peripheral_server_mode.as_ref().map(|cc| &cc.uuid)
+                        }
+                        _ => None,
+                    })
+                    .next()
+            })
     }
 
     pub fn first_central_client_uuid(&self) -> Option<&Uuid> {
@@ -267,7 +290,7 @@ impl SessionManager {
 
     /// Creates a new request with specified elements to request.
     pub fn new_request(&mut self, namespaces: device_request::Namespaces) -> Result<Vec<u8>> {
-        let request = self.build_request(namespaces)?;
+        let request = self.build_request("".into(), namespaces)?;
         let session = SessionData {
             data: Some(request.into()),
             status: None,
@@ -275,14 +298,14 @@ impl SessionManager {
         cbor::to_vec(&session).map_err(Into::into)
     }
 
-    fn build_request(&mut self, namespaces: device_request::Namespaces) -> Result<Vec<u8>> {
+    fn build_request(&mut self, docType: String, namespaces: device_request::Namespaces) -> Result<Vec<u8>> {
         // if !validate_request(namespaces.clone()).is_ok() {
         //     return Err(anyhow::Error::msg(
         //         "At least one of the namespaces contain an invalid combination of fields to request",
         //     ));
         // }
         let items_request = ItemsRequest {
-            doc_type: "org.iso.18013.5.1.mDL".into(),
+            doc_type: docType.into(),
             namespaces,
             request_info: None,
         };
@@ -305,22 +328,28 @@ impl SessionManager {
     }
 
     fn decrypt_response(&mut self, response: &[u8]) -> Result<DeviceResponse, Error> {
+        //println!("1");
         let session_data: SessionData = cbor::from_slice(response)?;
+        //println!("2");
         let encrypted_response = match session_data.data {
             None => return Err(Error::HolderError),
             Some(r) => r,
         };
+        //println!("3");
         let decrypted_response = session::decrypt_device_data(
             &self.sk_device.into(),
             encrypted_response.as_ref(),
             &mut self.device_message_counter,
         )
         .map_err(|_e| Error::DecryptionError)?;
+        //println!("Decrypted Response: {:#?}", decrypted_response);
         let device_response: DeviceResponse = cbor::from_slice(&decrypted_response)?;
+        println!("Device Response: {:#?}", device_response);
         Ok(device_response)
     }
 
     pub fn handle_response(&mut self, response: &[u8]) -> ResponseAuthenticationOutcome {
+        println!("Print Response");
         let mut validated_response = ResponseAuthenticationOutcome::default();
 
         let device_response = match self.decrypt_response(response) {
@@ -333,7 +362,7 @@ impl SessionManager {
                 return validated_response;
             }
         };
-
+        println!("Decrypted Response");
         match parse(&device_response) {
             Ok((document, x5chain, namespaces)) => {
                 self.validate_response(x5chain, document.clone(), namespaces)
@@ -393,7 +422,7 @@ impl SessionManager {
                 .insert("certificate_errors".to_string(), json!(validation_errors));
             validated_response.issuer_authentication = AuthenticationStatus::Invalid
         };
-
+        println!("Validated Response");
         validated_response
     }
 }
@@ -457,7 +486,7 @@ fn get_document(device_response: &DeviceResponse) -> Result<&Document, Error> {
         .as_ref()
         .ok_or(ReaderError::DeviceTransmissionError)?
         .iter()
-        .find(|doc| doc.doc_type == "org.iso.18013.5.1.mDL")
+        .find(|doc| doc.doc_type == "int.icao.epl.1")
         .ok_or(ReaderError::DocumentTypeError)
 }
 
@@ -487,15 +516,24 @@ fn _validate_request(namespaces: device_request::Namespaces) -> Result<bool, Err
 fn parse_namespaces(
     device_response: &DeviceResponse,
 ) -> Result<BTreeMap<String, serde_json::Value>, Error> {
-    let mut core_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut aamva_namespace = BTreeMap::<String, serde_json::Value>::new();
+    // let mut core_namespace = BTreeMap::<String, serde_json::Value>::new();
+    // let mut aamva_namespace = BTreeMap::<String, serde_json::Value>::new();
+    let mut general_namespace = BTreeMap::<String, serde_json::Value>::new();
+    let mut personnel_namespace = BTreeMap::<String, serde_json::Value>::new();
+    let mut authority_namespace = BTreeMap::<String, serde_json::Value>::new();
+    let mut ratings_namespace = BTreeMap::<String, serde_json::Value>::new();
+    let mut remarks_namespace = BTreeMap::<String, serde_json::Value>::new();
+    let mut medical_namespace = BTreeMap::<String, serde_json::Value>::new();
+    let mut additional_namespace = BTreeMap::<String, serde_json::Value>::new();
+
     let mut parsed_response = BTreeMap::<String, serde_json::Value>::new();
     let mut namespaces = device_response
         .documents
         .as_ref()
         .ok_or(Error::DeviceTransmissionError)?
         .iter()
-        .find(|doc| doc.doc_type == "org.iso.18013.5.1.mDL")
+        //.find(|doc| doc.doc_type == "org.iso.18013.5.1.mDL")
+        .find(|doc| doc.doc_type == "int.icao.epl.1")
         .ok_or(Error::DocumentTypeError)?
         .issuer_signed
         .namespaces
@@ -504,41 +542,136 @@ fn parse_namespaces(
         .clone()
         .into_inner();
 
-    namespaces
-        .remove("org.iso.18013.5.1")
-        .ok_or(Error::IncorrectNamespace)?
-        .into_inner()
-        .into_iter()
-        .map(|item| item.into_inner())
-        .for_each(|item| {
-            let value = parse_response(item.element_value.clone());
-            if let Ok(val) = value {
-                core_namespace.insert(item.element_identifier, val);
-            }
-        });
-
-    parsed_response.insert(
-        "org.iso.18013.5.1".to_string(),
-        serde_json::to_value(core_namespace)?,
-    );
-
-    if let Some(aamva_response) = namespaces.remove("org.iso.18013.5.1.aamva") {
-        aamva_response
+    if let Some(general_response) = namespaces.remove("int.icao.epl.general.1") {
+        general_response
             .into_inner()
             .into_iter()
             .map(|item| item.into_inner())
             .for_each(|item| {
                 let value = parse_response(item.element_value.clone());
                 if let Ok(val) = value {
-                    aamva_namespace.insert(item.element_identifier, val);
+                    general_namespace.insert(item.element_identifier, val);
                 }
             });
 
         parsed_response.insert(
-            "org.iso.18013.5.1.aamva".to_string(),
-            serde_json::to_value(aamva_namespace)?,
+            "int.icao.epl.general.1".to_string(),
+            serde_json::to_value(general_namespace)?,
         );
     }
+
+    if let Some(personnel_response) = namespaces.remove("int.icao.epl.personnel.1") {
+        personnel_response
+            .into_inner()
+            .into_iter()
+            .map(|item| item.into_inner())
+            .for_each(|item| {
+                let value = parse_response(item.element_value.clone());
+                if let Ok(val) = value {
+                    personnel_namespace.insert(item.element_identifier, val);
+                }
+            });
+
+        parsed_response.insert(
+            "int.icao.epl.personnel.1".to_string(),
+            serde_json::to_value(personnel_namespace)?,
+        );
+    }
+
+    if let Some(authority_response) = namespaces.remove("int.icao.epl.authority.1") {
+        authority_response
+            .into_inner()
+            .into_iter()
+            .map(|item| item.into_inner())
+            .for_each(|item| {
+                let value = parse_response(item.element_value.clone());
+                if let Ok(val) = value {
+                    authority_namespace.insert(item.element_identifier, val);
+                }
+            });
+
+        parsed_response.insert(
+            "int.icao.epl.authority.1".to_string(),
+            serde_json::to_value(authority_namespace)?,
+        );
+    }
+
+    if let Some(ratings_response) = namespaces.remove("int.icao.epl.ratings.1") {
+        ratings_response
+            .into_inner()
+            .into_iter()
+            .map(|item| item.into_inner())
+            .for_each(|item| {
+                let value = parse_response(item.element_value.clone());
+                if let Ok(val) = value {
+                    ratings_namespace.insert(item.element_identifier, val);
+                }
+            });
+
+        parsed_response.insert(
+            "int.icao.epl.ratings.1".to_string(),
+            serde_json::to_value(ratings_namespace)?,
+        );
+    }
+
+    if let Some(remarks_response) = namespaces.remove("int.icao.epl.remarks.1") {
+        remarks_response
+            .into_inner()
+            .into_iter()
+            .map(|item| item.into_inner())
+            .for_each(|item| {
+                let value = parse_response(item.element_value.clone());
+                if let Ok(val) = value {
+                    remarks_namespace.insert(item.element_identifier, val);
+                }
+            });
+
+        parsed_response.insert(
+            "int.icao.epl.remarks.1".to_string(),
+            serde_json::to_value(remarks_namespace)?,
+        );
+    }
+
+    if let Some(medical_response) = namespaces.remove("int.icao.epl.medical.1") {
+        medical_response
+            .into_inner()
+            .into_iter()
+            .map(|item| item.into_inner())
+            .for_each(|item| {
+                let value = parse_response(item.element_value.clone());
+                if let Ok(val) = value {
+                    medical_namespace.insert(item.element_identifier, val);
+                }
+            });
+
+        parsed_response.insert(
+            "int.icao.epl.medical.1".to_string(),
+            serde_json::to_value(medical_namespace)?,
+        );
+    }
+
+    if let Some(additional_response) = namespaces.remove("int.icao.epl.additional.1") {
+        additional_response
+            .into_inner()
+            .into_iter()
+            .map(|item| item.into_inner())
+            .for_each(|item| {
+                let value = parse_response(item.element_value.clone());
+                if let Ok(val) = value {
+                    additional_namespace.insert(item.element_identifier, val);
+                }
+            });
+
+        parsed_response.insert(
+            "int.icao.epl.additional.1".to_string(),
+            serde_json::to_value(additional_namespace)?,
+        );
+    }
+
+    if(parsed_response.is_empty()) {
+        return Err(Error::IncorrectNamespace);
+    }
+
     Ok(parsed_response)
 }
 

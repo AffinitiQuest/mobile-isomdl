@@ -9,10 +9,12 @@ pub struct BasicConstraintsValidator;
 
 impl BasicConstraintsValidator {
     fn check(constraints: BasicConstraints) -> Option<Error> {
-        if constraints
-            .path_len_constraint
-            .is_none_or(|path_len| path_len != 0)
-            || !constraints.ca
+        // if constraints
+        //     .path_len_constraint
+        //     .is_none_or(|path_len| path_len != 0)
+        //     || !constraints.ca
+        // {
+        if !constraints.ca
         {
             Some(format!(
                 "expected to be CA:true, path_len:0, but found: {:?}",

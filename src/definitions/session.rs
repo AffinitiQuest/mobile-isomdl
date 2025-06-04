@@ -269,7 +269,9 @@ fn decrypt(
 ) -> Result<Vec<u8>, aes_gcm::Error> {
     let initialization_vector = get_initialization_vector(message_count, reader);
     let nonce = Nonce::from(initialization_vector);
-    Aes256Gcm::new(session_key).decrypt(&nonce, ciphertext)
+    let decryptedValue = Aes256Gcm::new(session_key).decrypt(&nonce, ciphertext);
+    //println!("{:?}", decryptedValue);
+    decryptedValue
 }
 
 pub fn get_initialization_vector(message_count: &mut u32, reader: bool) -> [u8; 12] {

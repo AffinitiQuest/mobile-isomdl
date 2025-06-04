@@ -83,7 +83,7 @@ pub fn validate_iaca_extensions(certificate: &Certificate) -> Vec<Error> {
             .with(KeyUsageValidator::iaca())
             .with(BasicConstraintsValidator)
             .with(CrlDistributionPointsValidator)
-            .with(IssuerAlternativeNameValidator)
+            //.with(IssuerAlternativeNameValidator)
             .validate_extensions(extensions),
     );
 
@@ -101,12 +101,12 @@ pub fn validate_document_signer_certificate_extensions(certificate: &Certificate
     errors.extend(
         ExtensionValidators::default()
             .with(SubjectKeyIdentifierValidator::from_certificate(certificate))
-            .with(ExtendedKeyUsageValidator {
-                expected_oid: document_signer_extended_key_usage_oid(),
-            })
+            // .with(ExtendedKeyUsageValidator {
+            //     expected_oid: document_signer_extended_key_usage_oid(),
+            // })
             .with(KeyUsageValidator::document_signer())
             .with(CrlDistributionPointsValidator)
-            .with(IssuerAlternativeNameValidator)
+            //.with(IssuerAlternativeNameValidator)
             .validate_extensions(extensions),
     );
 

@@ -60,7 +60,7 @@ pub fn device_authentication(
             let verifying_key = VerifyingKey::from_encoded_point(&encoded_point)?;
             let namespaces_bytes = &document.device_signed.namespaces;
             let device_auth: &DeviceAuth = &document.device_signed.device_auth;
-
+            
             match device_auth {
                 DeviceAuth::DeviceSignature(device_signature) => {
                     let detached_payload = Tag24::new(DeviceAuthentication::new(

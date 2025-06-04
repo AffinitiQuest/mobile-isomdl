@@ -39,7 +39,7 @@ use std::collections::BTreeMap;
 /// Therefore the most straightforward way to represent it is as a i32 that is enforced to be
 /// positive.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, Ord, PartialEq, PartialOrd, Copy, Hash)]
-pub struct DigestId(i32);
+pub struct DigestId(i64);
 pub type DigestIds = BTreeMap<DigestId, ByteStr>;
 
 /// Represents an [Mso] object.
@@ -76,7 +76,7 @@ pub enum DigestAlgorithm {
 }
 
 impl DigestId {
-    pub fn new(i: i32) -> DigestId {
+    pub fn new(i: i64) -> DigestId {
         DigestId(if i.is_negative() { -i } else { i })
     }
 }

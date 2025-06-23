@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::definitions::{
     helpers::{NonEmptyMap, NonEmptyVec},
-    DeviceSigned, IssuerSigned,
+    DeviceSigned, IssuerSigned, DeviceAuth,
 };
 
 /// Represents a device response.
@@ -19,6 +19,10 @@ pub struct DeviceResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub documents: Option<Documents>,
 
+    /// The documents associated with the response, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub w3c_documents: Option<W3CDocuments>,
+
     /// The errors associated with the documents, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub document_errors: Option<DocumentErrors>,
@@ -28,6 +32,7 @@ pub struct DeviceResponse {
 }
 
 pub type Documents = NonEmptyVec<Document>;
+pub type W3CDocuments = NonEmptyVec<W3CDocument>;
 
 /// Represents a document.
 ///
@@ -44,6 +49,27 @@ pub struct Document {
     /// An instance of the [DeviceSigned] struct representing the device-signed data.
     #[serde(skip_serializing)]
     pub device_signed: DeviceSigned,
+
+    /// An optional instance of the [Errors] struct representing any errors associated with the document.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errors: Option<Errors>,
+}
+
+/// Represents a W3C document.
+///
+/// This struct is used to store information about a document.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct W3CDocument {
+    /// A string representing the type of the document.
+    pub doc_type: String,
+
+    /// An instance of the [IssuerSigned] struct representing the issuer-signed data.
+    pub jwt: String,
+
+    /// An instance of the [DeviceSigned] struct representing the device-signed data.
+    #[serde(skip_serializing)]
+    pub device_auth: DeviceAuth,
 
     /// An optional instance of the [Errors] struct representing any errors associated with the document.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -204,6 +230,7 @@ mod test {
         let res = DeviceResponse {
             version: "1.0".to_string(),
             documents: Some(docs),
+            w3c_documents: None,
             document_errors: Some(errors),
             status: Status::OK,
         };

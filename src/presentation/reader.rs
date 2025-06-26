@@ -35,7 +35,7 @@ use crate::{
         device_engagement::DeviceRetrievalMethod,
         device_key::cose_key::Error as CoseError,
         device_request::{self, DeviceRequest, DocRequest, ItemsRequest},
-        device_response::{Document,W3CDocument},
+        device_response::{Document},
         helpers::{non_empty_vec, NonEmptyVec, Tag24},
         session::{
             self, create_p256_ephemeral_keys, derive_session_key, get_shared_secret, Handover,
@@ -180,7 +180,7 @@ impl SessionManager {
     /// (using **Diffie–Hellman key exchange**).
     pub fn establish_session(
         qr_code: String,
-        docType: String,
+        doc_type: String,
         namespaces: device_request::Namespaces,
         trust_anchor_registry: TrustAnchorRegistry,
     ) -> Result<(Self, Vec<u8>, [u8; 16])> {
@@ -238,7 +238,7 @@ impl SessionManager {
         };
 
         let request = session_manager
-            .build_request(docType, namespaces)
+            .build_request(doc_type, namespaces)
             .context("failed to build device request")?;
         let session = SessionEstablishment {
             data: request.into(),
@@ -298,14 +298,14 @@ impl SessionManager {
         cbor::to_vec(&session).map_err(Into::into)
     }
 
-    fn build_request(&mut self, docType: String, namespaces: device_request::Namespaces) -> Result<Vec<u8>> {
+    fn build_request(&mut self, doc_type: String, namespaces: device_request::Namespaces) -> Result<Vec<u8>> {
         // if !validate_request(namespaces.clone()).is_ok() {
         //     return Err(anyhow::Error::msg(
         //         "At least one of the namespaces contain an invalid combination of fields to request",
         //     ));
         // }
         let items_request = ItemsRequest {
-            doc_type: docType.into(),
+            doc_type: doc_type.into(),
             namespaces,
             request_info: None,
         };
@@ -356,7 +356,7 @@ impl SessionManager {
                 return validated_response;
             }
         };
-        println!("Decrypted Response");
+
         match parse(&device_response) {
             Ok((document, x5chain, namespaces)) => {
                 self.validate_response(x5chain, document.clone(), namespaces)
@@ -366,16 +366,16 @@ impl SessionManager {
                     .errors
                     .insert("parsing_errors".to_string(), json!(vec![format!("{e:?}")]));
                 
-                //let v = json!(&device_response.w3c_documents.unwrap());
+                // If there exists some w3c docs, try to validate them.
                 if let Some(_w3c_docs) = device_response.w3c_documents {
                     let mut w3c_document = BTreeMap::new();
                     if let Some(_first_document) = _w3c_docs.first() {
                         w3c_document.insert("doc_type".to_string(), _first_document.doc_type.to_string());
                         w3c_document.insert("jwt".to_string(), _first_document.jwt.to_string());
-                        //let bytes = cbor::to_vec(&first_document.device_auth).unwrap();
-                        //w3c_document.insert("device_auth".to_string(), hex::encode(&bytes));
+                        
                         match w3c_device_authentication(_first_document, self.session_transcript.clone()) {
                             Ok(()) => {
+                                validated_response.errors.clear();
                                 validated_response.device_authentication = AuthenticationStatus::Valid
                             }
                             Err(e) => {

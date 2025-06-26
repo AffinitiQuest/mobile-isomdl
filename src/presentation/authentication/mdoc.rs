@@ -2,29 +2,25 @@ use crate::cbor;
 use crate::cose;
 use crate::definitions::device_response::Document;
 use crate::definitions::device_response::W3CDocument;
-use crate::definitions::device_signed::DeviceNamespacesBytes;
 use crate::definitions::issuer_signed;
 use crate::definitions::x509::X5Chain;
-use crate::definitions::CoseKey;
 use crate::definitions::DeviceAuth;
-use crate::definitions::EC2Curve;
 use crate::definitions::Mso;
-use crate::definitions::EC2Y;
 use crate::definitions::{
     device_signed::{DeviceAuthentication, W3CDeviceAuthentication}, helpers::Tag24, SessionTranscript180135,
 };
 use crate::presentation::reader::Error;
 use anyhow::Result;
-use coset::iana;
-use coset::CoseKeyBuilder;
 use elliptic_curve::generic_array::GenericArray;
 use issuer_signed::IssuerSigned;
 use p256::ecdsa::Signature;
 use p256::ecdsa::VerifyingKey;
-use serde::Serialize;
 use ssi_jwk::Params;
 use ssi_jwk::JWK as SsiJwk;
-use std::collections::BTreeMap;
+use ssi_jws::Jws as SsiJws;
+use std::str::FromStr;
+use jsonwebtokens as jwts;
+use jwts::{raw::{self, TokenSlices}};
 
 pub fn issuer_authentication(x5chain: X5Chain, issuer_signed: &IssuerSigned) -> Result<(), Error> {
     let signer_key = x5chain
@@ -44,16 +40,25 @@ pub fn w3c_device_authentication(
     session_transcript: SessionTranscript180135,
 ) -> Result<(), Error> {
     let jwt = document.jwt.clone();
-    let mut device_jwk = BTreeMap::new();
-    device_jwk.insert("alg", "ES256");
-    device_jwk.insert("kty", "EC");
-    //device_jwk.insert("use", "sig");
-    device_jwk.insert("x", "kNYnHB2Mxald17CScUyumLGMUmh_Iy1k0IllLHWJviw");
-    device_jwk.insert("y", "YbnKNspahbv7dJbEAHRh-zUQKIDqTTuMxQjv4MQJftY");
-    //let device_key = CoseKey::EC2 { crv: EC2Curve::P256, x: base64_url::decode("kNYnHB2Mxald17CScUyumLGMUmh_Iy1k0IllLHWJviw").unwrap(), y: EC2Y::Value(base64_url::decode("YbnKNspahbv7dJbEAHRh-zUQKIDqTTuMxQjv4MQJftY").unwrap())};
-                
-    let jwk: SsiJwk = serde_json::json!(device_jwk).try_into().unwrap();//SsiJwk::try_from(device_jwk)?;
-    match jwk.params {
+    let jws: std::result::Result<&SsiJws, ssi_jws::InvalidJws<&str>> = SsiJws::from_str_const(&jwt);
+    println!("JWS: {:#?}", jws.unwrap().decode().unwrap());
+    
+    let TokenSlices{claims,..} = raw::split_token(&jwt).map_err(|_| Error::ParsingError)?;// .expect("Error Slicing the token");
+    let raw_claim = raw::decode_json_token_slice(claims).map_err(|_| Error::ParsingError)?;
+    
+    let payload_object= raw_claim.as_object().ok_or(Error::ParsingError)?;
+    let vc = payload_object["vc"].as_object().ok_or(Error::ParsingError)?;
+    let credential_subject = vc["credentialSubject"].as_object().ok_or(Error::ParsingError)?;
+    let jwk = credential_subject["id"].as_str().ok_or(Error::ParsingError)?;
+    
+    let key_part = &jwk[8..];
+    
+    let jwk_values = base64_url::decode(key_part).map_err(|_| Error::ParsingError)?;
+    
+    let binding_key_jwk_val = String::from_utf8(jwk_values).map_err(|_| Error::ParsingError)?;
+    let binding_key_jwk:SsiJwk = SsiJwk::from_str(&binding_key_jwk_val).map_err(|_| Error::ParsingError)?;
+    
+    match binding_key_jwk.params {
         Params::EC(p) => {
             let x_coordinate = p.x_coordinate.clone();
             let y_coordinate = p.y_coordinate.clone();
@@ -100,22 +105,6 @@ pub fn w3c_device_authentication(
         }
         _ => Err(Error::MdocAuth("Unsupported device_key type".to_string())),
     }
-    // let device_auth: &DeviceAuth = &document.device_auth;
-    // match device_auth {
-    //     DeviceAuth::DeviceSignature(device_signature) => {
-    //         let detached_payload = Tag24::new(W3CDeviceAuthentication::new(
-    //             session_transcript,
-    //             document.doc_type.clone()
-    //         ))
-    //         .map_err(|_| Error::CborDecodingError)?;
-    //         let cbor_payload = cbor::to_vec(&detached_payload)?;
-    //         Ok(cbor_payload)
-    //     }
-    //     DeviceAuth::DeviceMac(_) => {
-    //         Err(Error::Unsupported)
-    //         // send not yet supported error
-    //     }
-    // }
 }
 
 pub fn device_authentication(

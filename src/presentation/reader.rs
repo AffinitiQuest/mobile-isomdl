@@ -181,6 +181,7 @@ impl SessionManager {
     pub fn establish_session(
         qr_code: String,
         doc_type: String,
+        format: String,
         namespaces: device_request::Namespaces,
         trust_anchor_registry: TrustAnchorRegistry,
     ) -> Result<(Self, Vec<u8>, [u8; 16])> {
@@ -238,7 +239,7 @@ impl SessionManager {
         };
 
         let request = session_manager
-            .build_request(doc_type, namespaces)
+            .build_request(doc_type, format, namespaces)
             .context("failed to build device request")?;
         let session = SessionEstablishment {
             data: request.into(),
@@ -290,7 +291,7 @@ impl SessionManager {
 
     /// Creates a new request with specified elements to request.
     pub fn new_request(&mut self, namespaces: device_request::Namespaces) -> Result<Vec<u8>> {
-        let request = self.build_request("".into(), namespaces)?;
+        let request = self.build_request("".into(), "mdoc".to_string(), namespaces)?;
         let session = SessionData {
             data: Some(request.into()),
             status: None,
@@ -298,16 +299,18 @@ impl SessionManager {
         cbor::to_vec(&session).map_err(Into::into)
     }
 
-    fn build_request(&mut self, doc_type: String, namespaces: device_request::Namespaces) -> Result<Vec<u8>> {
+    fn build_request(&mut self, doc_type: String, format: String, namespaces: device_request::Namespaces) -> Result<Vec<u8>> {
         // if !validate_request(namespaces.clone()).is_ok() {
         //     return Err(anyhow::Error::msg(
         //         "At least one of the namespaces contain an invalid combination of fields to request",
         //     ));
         // }
+        let mut request_info = BTreeMap::new();
+        request_info.insert("format".to_string(), ciborium::Value::Text(format));
         let items_request = ItemsRequest {
             doc_type: doc_type.into(),
             namespaces,
-            request_info: None,
+            request_info: Some(request_info),
         };
 
         let doc_request = DocRequest {

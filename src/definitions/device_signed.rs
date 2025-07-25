@@ -57,6 +57,26 @@ pub struct DeviceAuthentication<S: SessionTranscript>(
     DeviceNamespacesBytes,
 );
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct W3CDeviceAuthentication<S: SessionTranscript>(
+    &'static str,
+    // See https://github.com/serde-rs/serde/issues/1296.
+    #[serde(bound = "")] S,
+    String,
+    Tag24<BTreeMap<String, String>>,
+);
+
+impl<S: SessionTranscript> W3CDeviceAuthentication<S> {
+    pub fn new(transcript: S, doc_type: String) -> Self {
+        Self(
+            "DeviceAuthentication",
+            transcript,
+            doc_type,
+            Tag24::new(BTreeMap::new()).unwrap(),
+        )
+    }
+}
+
 impl<S: SessionTranscript> DeviceAuthentication<S> {
     pub fn new(transcript: S, doc_type: String, namespaces_bytes: DeviceNamespacesBytes) -> Self {
         Self(

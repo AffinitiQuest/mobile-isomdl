@@ -24,7 +24,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::authentication::{
-    mdoc::{device_authentication, issuer_authentication},
+    mdoc::{device_authentication, w3c_device_authentication, issuer_authentication},
     AuthenticationStatus, ResponseAuthenticationOutcome,
 };
 
@@ -35,7 +35,7 @@ use crate::{
         device_engagement::DeviceRetrievalMethod,
         device_key::cose_key::Error as CoseError,
         device_request::{self, DeviceRequest, DocRequest, ItemsRequest},
-        device_response::Document,
+        device_response::{Document},
         helpers::{non_empty_vec, NonEmptyVec, Tag24},
         session::{
             self, create_p256_ephemeral_keys, derive_session_key, get_shared_secret, Handover,
@@ -180,7 +180,8 @@ impl SessionManager {
     /// (using **Diffie–Hellman key exchange**).
     pub fn establish_session(
         qr_code: String,
-        docType: String,
+        doc_type: String,
+        format: String,
         namespaces: device_request::Namespaces,
         trust_anchor_registry: TrustAnchorRegistry,
     ) -> Result<(Self, Vec<u8>, [u8; 16])> {
@@ -238,7 +239,7 @@ impl SessionManager {
         };
 
         let request = session_manager
-            .build_request(docType, namespaces)
+            .build_request(doc_type, format, namespaces)
             .context("failed to build device request")?;
         let session = SessionEstablishment {
             data: request.into(),
@@ -290,7 +291,7 @@ impl SessionManager {
 
     /// Creates a new request with specified elements to request.
     pub fn new_request(&mut self, namespaces: device_request::Namespaces) -> Result<Vec<u8>> {
-        let request = self.build_request("".into(), namespaces)?;
+        let request = self.build_request("".into(), "mdoc".to_string(), namespaces)?;
         let session = SessionData {
             data: Some(request.into()),
             status: None,
@@ -298,16 +299,18 @@ impl SessionManager {
         cbor::to_vec(&session).map_err(Into::into)
     }
 
-    fn build_request(&mut self, docType: String, namespaces: device_request::Namespaces) -> Result<Vec<u8>> {
+    fn build_request(&mut self, doc_type: String, format: String, namespaces: device_request::Namespaces) -> Result<Vec<u8>> {
         // if !validate_request(namespaces.clone()).is_ok() {
         //     return Err(anyhow::Error::msg(
         //         "At least one of the namespaces contain an invalid combination of fields to request",
         //     ));
         // }
+        let mut request_info = BTreeMap::new();
+        request_info.insert("format".to_string(), ciborium::Value::Text(format));
         let items_request = ItemsRequest {
-            doc_type: docType.into(),
+            doc_type: doc_type.into(),
             namespaces,
-            request_info: None,
+            request_info: Some(request_info),
         };
 
         let doc_request = DocRequest {
@@ -328,28 +331,22 @@ impl SessionManager {
     }
 
     fn decrypt_response(&mut self, response: &[u8]) -> Result<DeviceResponse, Error> {
-        //println!("1");
         let session_data: SessionData = cbor::from_slice(response)?;
-        //println!("2");
         let encrypted_response = match session_data.data {
             None => return Err(Error::HolderError),
             Some(r) => r,
         };
-        //println!("3");
         let decrypted_response = session::decrypt_device_data(
             &self.sk_device.into(),
             encrypted_response.as_ref(),
             &mut self.device_message_counter,
         )
         .map_err(|_e| Error::DecryptionError)?;
-        //println!("Decrypted Response: {:#?}", decrypted_response);
         let device_response: DeviceResponse = cbor::from_slice(&decrypted_response)?;
-        println!("Device Response: {:#?}", device_response);
         Ok(device_response)
     }
 
     pub fn handle_response(&mut self, response: &[u8]) -> ResponseAuthenticationOutcome {
-        println!("Print Response");
         let mut validated_response = ResponseAuthenticationOutcome::default();
 
         let device_response = match self.decrypt_response(response) {
@@ -362,7 +359,7 @@ impl SessionManager {
                 return validated_response;
             }
         };
-        println!("Decrypted Response");
+
         match parse(&device_response) {
             Ok((document, x5chain, namespaces)) => {
                 self.validate_response(x5chain, document.clone(), namespaces)
@@ -371,7 +368,38 @@ impl SessionManager {
                 validated_response
                     .errors
                     .insert("parsing_errors".to_string(), json!(vec![format!("{e:?}")]));
-                validated_response
+                
+                // If there exists some w3c docs, try to validate them.
+                if let Some(_w3c_docs) = device_response.w3c_documents {
+                    let mut w3c_document = BTreeMap::new();
+                    if let Some(_first_document) = _w3c_docs.first() {
+                        w3c_document.insert("doc_type".to_string(), _first_document.doc_type.to_string());
+                        w3c_document.insert("jwt".to_string(), _first_document.jwt.to_string());
+                        
+                        match w3c_device_authentication(_first_document, self.session_transcript.clone()) {
+                            Ok(()) => {
+                                validated_response.errors.clear();
+                                validated_response.device_authentication = AuthenticationStatus::Valid
+                            }
+                            Err(e) => {
+                                validated_response.device_authentication = AuthenticationStatus::Invalid;
+                                validated_response.errors.insert(
+                                    "device_authentication_errors".to_string(),
+                                    json!(vec![format!("{e:?}")]),
+                                );
+                            }
+                        }
+                        let v = json!(&w3c_document);
+                        validated_response
+                            .response
+                            .insert("w3c_documents".to_string(), v);
+                        validated_response
+                    } else {
+                        validated_response
+                    }
+                } else {
+                    validated_response
+                }
             }
         }
     }

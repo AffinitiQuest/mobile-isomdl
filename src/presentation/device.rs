@@ -720,6 +720,7 @@ impl PreparedDeviceResponse {
         DeviceResponse {
             version: DeviceResponse::VERSION.into(),
             documents: self.signed_documents.try_into().ok(),
+            w3c_documents: None,
             document_errors: self.document_errors,
             status: self.status,
         }

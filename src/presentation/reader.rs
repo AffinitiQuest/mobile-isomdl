@@ -35,10 +35,10 @@ use super::authentication::{
     AuthenticationStatus, ResponseAuthenticationOutcome,
 };
 
+use crate::definitions::x509;
 use crate::cose::sign1::PreparedCoseSign1;
 use crate::cose::SignatureAlgorithm;
 use crate::definitions::device_request::ReaderAuth;
-use crate::definitions::x509::{self};
 use crate::{
     cbor::{self, CborError},
     definitions::{

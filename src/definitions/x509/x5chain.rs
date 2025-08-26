@@ -161,6 +161,14 @@ impl Builder {
             "at least one certificate must be given to the builder",
         )?))
     }
+    pub fn with_der_chain(mut self, data: Vec<std::string::String>) -> Result<Builder> {
+        for item in data {
+            let decoded_der_str = base64::decode(&item).unwrap();
+            let x509 = CertificateWithDer::from_der(&decoded_der_str)?;
+            self.certs.push(x509);
+        }
+        Ok(self)
+    }
 }
 
 #[cfg(test)]

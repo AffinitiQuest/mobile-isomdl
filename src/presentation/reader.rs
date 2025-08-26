@@ -18,10 +18,17 @@ use std::collections::BTreeMap;
 use anyhow::Context;
 use anyhow::{anyhow, Result};
 use coset::Label;
+use ecdsa::SignatureEncoding;
+use sec1::pkcs8::DecodePrivateKey;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value;
+use signature::{Signer};
 use uuid::Uuid;
+
+use coset::iana;
+use p256::ecdsa::{Signature, SigningKey};
+use p256::{SecretKey};
 
 use super::authentication::{
     mdoc::{device_authentication, w3c_device_authentication, issuer_authentication},
@@ -29,6 +36,9 @@ use super::authentication::{
 };
 
 use crate::definitions::x509;
+use crate::cose::sign1::PreparedCoseSign1;
+use crate::cose::SignatureAlgorithm;
+use crate::definitions::device_request::ReaderAuth;
 use crate::{
     cbor::{self, CborError},
     definitions::{
@@ -298,6 +308,47 @@ impl SessionManager {
         };
         cbor::to_vec(&session).map_err(Into::into)
     }
+    
+    fn sign<S, Sig>(signature_payload: &[u8], s: &S) -> anyhow::Result<Vec<u8>>
+    where
+        S: Signer<Sig> + SignatureAlgorithm,
+        Sig: SignatureEncoding,
+    {
+        Ok(s.try_sign(signature_payload)?
+            .to_vec())
+    }
+    
+    fn generate_reader_auth(session_transcript: SessionTranscript180135, item_request: ItemsRequest) -> Result<ReaderAuth> {
+        let private_key: &str = include_str!("../definitions/ReaderAuthFiles/private.pem");
+        let x5c_file = include_bytes!("../definitions/ReaderAuthFiles/chain.x5c");
+
+        let x5c_vec: Vec<String> = serde_json::from_slice(x5c_file)?;
+        let x5chain = X5Chain::builder().with_der_chain(x5c_vec)?.build()?;
+
+        let signer: SigningKey = SecretKey::from_pkcs8_pem(private_key)?.into();
+        let protected = coset::HeaderBuilder::new()
+            .algorithm(iana::Algorithm::ES256)
+            .build();
+        let unprotected = coset::HeaderBuilder::new().value(33, x5chain.into_cbor()).build();
+        let builder = coset::CoseSign1Builder::new()
+            .protected(protected)
+            .unprotected(unprotected);
+        let detached_payload = Tag24::new(ReaderAuthentication(
+            "ReaderAuthentication".into(),
+            session_transcript.clone(),
+            Tag24::new(item_request)?
+        ))?;
+
+        let detached_payload_bytes = cbor::to_vec(&detached_payload)?;
+        let prepared = PreparedCoseSign1::new(builder, Some(&detached_payload_bytes), None, false)?;
+        let signature_payload = prepared.signature_payload();
+        
+        let signature = Self::sign::<SigningKey, Signature>(signature_payload, &signer)?
+            .to_vec();
+        let cose_sign1 = prepared.finalize(signature);
+
+        return Ok(cose_sign1)
+    }
 
     fn build_request(&mut self, doc_type: String, format: String, namespaces: device_request::Namespaces) -> Result<Vec<u8>> {
         // if !validate_request(namespaces.clone()).is_ok() {
@@ -313,8 +364,10 @@ impl SessionManager {
             request_info: Some(request_info),
         };
 
+        let reader_auth = Self::generate_reader_auth(self.session_transcript.clone(), items_request.clone())?;
+
         let doc_request = DocRequest {
-            reader_auth: None,
+            reader_auth: Some(reader_auth),
             items_request: Tag24::new(items_request)?,
         };
         let device_request = DeviceRequest {

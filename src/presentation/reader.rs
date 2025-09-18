@@ -80,6 +80,8 @@ pub struct ReaderAuthentication(
     pub ItemsRequestBytes,
 );
 
+pub type ResponseAuthenticationOutcomes = NonEmptyVec<ResponseAuthenticationOutcome>;
+
 /// Various errors that can occur during the interaction with the device.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -399,7 +401,7 @@ impl SessionManager {
         Ok(device_response)
     }
 
-    pub fn handle_response(&mut self, response: &[u8]) -> ResponseAuthenticationOutcome {
+    pub fn handle_response(&mut self, response: &[u8]) -> ResponseAuthenticationOutcomes {
         let mut validated_response = ResponseAuthenticationOutcome::default();
 
         let device_response = match self.decrypt_response(response) {
@@ -409,13 +411,13 @@ impl SessionManager {
                     "decryption_errors".to_string(),
                     json!(vec![format!("{e:?}")]),
                 );
-                return validated_response;
+                return ResponseAuthenticationOutcomes::new(validated_response);
             }
         };
 
         match parse(&device_response) {
             Ok((document, x5chain, namespaces)) => {
-                self.validate_response(x5chain, document.clone(), namespaces)
+                ResponseAuthenticationOutcomes::new(self.validate_response(x5chain, document.clone(), namespaces))
             }
             Err(e) => {
                 validated_response
@@ -446,12 +448,12 @@ impl SessionManager {
                         validated_response
                             .response
                             .insert("w3c_documents".to_string(), v);
-                        validated_response
+                        ResponseAuthenticationOutcomes::new(validated_response)
                     } else {
-                        validated_response
+                        ResponseAuthenticationOutcomes::new(validated_response)
                     }
                 } else {
-                    validated_response
+                    ResponseAuthenticationOutcomes::new(validated_response)
                 }
             }
         }
@@ -507,6 +509,22 @@ impl SessionManager {
         validated_response
     }
 }
+
+// fn parse_document(
+//     document: &Document
+// ) -> Result<(&Document, X5Chain, BTreeMap<String, Value>), Error> {
+//     let header = document.issuer_signed.issuer_auth.unprotected.clone();
+//     let x5chain = header
+//         .rest
+//         .iter()
+//         .find(|(label, _)| label == &Label::Int(X5CHAIN_COSE_HEADER_LABEL))
+//         .map(|(_, value)| value.to_owned())
+//         .map(X5Chain::from_cbor)
+//         .ok_or(Error::X5ChainMissing)?
+//         .map_err(Error::X5ChainParsing)?;
+//     let parsed_response = parse_namespaces(device_response)?;
+//     Ok((document, x5chain, parsed_response))    
+// }
 
 fn parse(
     device_response: &DeviceResponse,

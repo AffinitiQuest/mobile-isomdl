@@ -35,6 +35,12 @@ pub struct ResponseAuthenticationOutcome {
     pub errors: Errors,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct ResponseAuthenticationOutcomes {
+    pub responses: Vec<ResponseAuthenticationOutcome>,
+    pub errors: Errors,
+}
+
 /// The outcome of authenticity checks.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, Copy)]
 pub enum AuthenticationStatus {

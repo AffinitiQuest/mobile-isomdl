@@ -39,6 +39,7 @@ use crate::definitions::x509;
 use crate::cose::sign1::PreparedCoseSign1;
 use crate::cose::SignatureAlgorithm;
 use crate::definitions::device_request::ReaderAuth;
+use crate::presentation::authentication::ResponseAuthenticationOutcomes;
 use crate::{
     cbor::{self, CborError},
     definitions::{
@@ -399,39 +400,43 @@ impl SessionManager {
         Ok(device_response)
     }
 
-    pub fn handle_response(&mut self, response: &[u8]) -> ResponseAuthenticationOutcome {
-        let mut validated_response = ResponseAuthenticationOutcome::default();
+    pub fn handle_response(&mut self, response: &[u8]) -> ResponseAuthenticationOutcomes {
+        let mut validated_responses = ResponseAuthenticationOutcomes::default();
 
         let device_response = match self.decrypt_response(response) {
             Ok(device_response) => device_response,
             Err(e) => {
-                validated_response.errors.insert(
+                validated_responses.errors.insert(
                     "decryption_errors".to_string(),
                     json!(vec![format!("{e:?}")]),
                 );
-                return validated_response;
+                return validated_responses;
             }
         };
 
-        match parse(&device_response) {
-            Ok((document, x5chain, namespaces)) => {
-                self.validate_response(x5chain, document.clone(), namespaces)
+        // Parse all MDOC docs with int.icao.epl.1 doc_type.
+        let document_responses = match parse_documents(&device_response) {
+            Ok(document_res) => {
+                document_res
             }
             Err(e) => {
-                validated_response
-                    .errors
-                    .insert("parsing_errors".to_string(), json!(vec![format!("{e:?}")]));
+                validated_responses.errors.insert(
+                    "parsing_errors".to_string(),
+                    json!(vec![format!("{e:?}")]),
+                );
                 
                 // If there exists some w3c docs, try to validate them.
                 if let Some(_w3c_docs) = device_response.w3c_documents {
                     let mut w3c_document = BTreeMap::new();
                     if let Some(_first_document) = _w3c_docs.first() {
+                        let mut validated_response = ResponseAuthenticationOutcome::default();
+
                         w3c_document.insert("doc_type".to_string(), _first_document.doc_type.to_string());
                         w3c_document.insert("jwt".to_string(), _first_document.jwt.to_string());
                         
                         match w3c_device_authentication(_first_document, self.session_transcript.clone()) {
                             Ok(()) => {
-                                validated_response.errors.clear();
+                                validated_responses.errors.clear();
                                 validated_response.device_authentication = AuthenticationStatus::Valid
                             }
                             Err(e) => {
@@ -446,15 +451,37 @@ impl SessionManager {
                         validated_response
                             .response
                             .insert("w3c_documents".to_string(), v);
-                        validated_response
+                        validated_responses.responses.push(validated_response);
+                        
+                        return validated_responses
                     } else {
-                        validated_response
+                        return validated_responses
                     }
                 } else {
-                    validated_response
+                    return validated_responses
                 }
             }
+        };
+
+        println!("Number of parsed documents: {:#?}", document_responses.len());
+
+        //validate MDOCs.
+        for document in document_responses.iter() {
+            let validated_response = self.validate_response(document.1.clone(), document.0.clone(), document.2.clone());
+            validated_responses.responses.push(validated_response);
         }
+
+        // let validated_doc_responses: Vec<ResponseAuthenticationOutcome> = document_responses
+        //     .iter()
+        //     .map(|document| {
+        //         let validated_response = self.validate_response(document.1.clone(), document.0.clone(), document.2.clone());
+        //         validated_responses.responses.push(validated_response);
+        //         println!("Number of parsed documents: {:#?}", validated_responses.responses.len());
+        //     })
+        //     .collect();
+
+        println!("Number of parsed documents: {:#?}", validated_responses.responses.len());
+        return validated_responses
     }
 
     fn validate_response(
@@ -506,6 +533,36 @@ impl SessionManager {
         println!("Validated Response");
         validated_response
     }
+}
+
+fn parse_documents(
+    device_response: &DeviceResponse
+) -> Result<Vec<(&Document, X5Chain, BTreeMap<String, Value>)>, Error> {
+    let documents: Vec<(&Document, X5Chain, BTreeMap<String, Value>)> = device_response
+        .documents
+        .as_ref()
+        .ok_or(ReaderError::DeviceTransmissionError)?
+        .iter()
+        .filter(|doc| doc.doc_type == "int.icao.epl.1".to_string() )
+        .map(|doc| parse_document(doc).unwrap())
+        .collect();
+    return Ok(documents);
+}
+
+fn parse_document(
+    document: &Document,
+) -> Result<(&Document, X5Chain, BTreeMap<String, Value>), Error> {
+    let header = document.issuer_signed.issuer_auth.unprotected.clone();
+    let x5chain = header
+        .rest
+        .iter()
+        .find(|(label, _)| label == &Label::Int(X5CHAIN_COSE_HEADER_LABEL))
+        .map(|(_, value)| value.to_owned())
+        .map(X5Chain::from_cbor)
+        .ok_or(Error::X5ChainMissing)?
+        .map_err(Error::X5ChainParsing)?;
+    let parsed_response = parse_namespaces_for_doc(document)?;
+    Ok((document, x5chain, parsed_response))
 }
 
 fn parse(
@@ -591,6 +648,161 @@ fn _validate_request(namespaces: device_request::Namespaces) -> Result<bool, Err
     }
 
     Ok(true)
+}
+
+fn parse_namespaces_for_doc(
+    document: &Document
+) -> Result<BTreeMap<String, serde_json::Value>, Error> {
+    // let mut core_namespace = BTreeMap::<String, serde_json::Value>::new();
+    // let mut aamva_namespace = BTreeMap::<String, serde_json::Value>::new();
+    let mut general_namespace = BTreeMap::<String, serde_json::Value>::new();
+    let mut personnel_namespace = BTreeMap::<String, serde_json::Value>::new();
+    let mut authority_namespace = BTreeMap::<String, serde_json::Value>::new();
+    let mut ratings_namespace = BTreeMap::<String, serde_json::Value>::new();
+    let mut remarks_namespace = BTreeMap::<String, serde_json::Value>::new();
+    let mut medical_namespace = BTreeMap::<String, serde_json::Value>::new();
+    let mut additional_namespace = BTreeMap::<String, serde_json::Value>::new();
+
+    let mut parsed_response = BTreeMap::<String, serde_json::Value>::new();
+    let mut namespaces = document
+        .issuer_signed
+        .namespaces
+        .as_ref()
+        .ok_or(Error::NoMdlDataTransmission)?
+        .clone()
+        .into_inner();
+
+    if let Some(general_response) = namespaces.remove("int.icao.epl.general.1") {
+        general_response
+            .into_inner()
+            .into_iter()
+            .map(|item| item.into_inner())
+            .for_each(|item| {
+                let value = parse_response(item.element_value.clone());
+                if let Ok(val) = value {
+                    general_namespace.insert(item.element_identifier, val);
+                }
+            });
+
+        parsed_response.insert(
+            "int.icao.epl.general.1".to_string(),
+            serde_json::to_value(general_namespace)?,
+        );
+    }
+
+    if let Some(personnel_response) = namespaces.remove("int.icao.epl.personnel.1") {
+        personnel_response
+            .into_inner()
+            .into_iter()
+            .map(|item| item.into_inner())
+            .for_each(|item| {
+                let value = parse_response(item.element_value.clone());
+                if let Ok(val) = value {
+                    personnel_namespace.insert(item.element_identifier, val);
+                }
+            });
+
+        parsed_response.insert(
+            "int.icao.epl.personnel.1".to_string(),
+            serde_json::to_value(personnel_namespace)?,
+        );
+    }
+
+    if let Some(authority_response) = namespaces.remove("int.icao.epl.authority.1") {
+        authority_response
+            .into_inner()
+            .into_iter()
+            .map(|item| item.into_inner())
+            .for_each(|item| {
+                let value = parse_response(item.element_value.clone());
+                if let Ok(val) = value {
+                    authority_namespace.insert(item.element_identifier, val);
+                }
+            });
+
+        parsed_response.insert(
+            "int.icao.epl.authority.1".to_string(),
+            serde_json::to_value(authority_namespace)?,
+        );
+    }
+
+    if let Some(ratings_response) = namespaces.remove("int.icao.epl.ratings.1") {
+        ratings_response
+            .into_inner()
+            .into_iter()
+            .map(|item| item.into_inner())
+            .for_each(|item| {
+                let value = parse_response(item.element_value.clone());
+                if let Ok(val) = value {
+                    ratings_namespace.insert(item.element_identifier, val);
+                }
+            });
+
+        parsed_response.insert(
+            "int.icao.epl.ratings.1".to_string(),
+            serde_json::to_value(ratings_namespace)?,
+        );
+    }
+
+    if let Some(remarks_response) = namespaces.remove("int.icao.epl.remarks.1") {
+        remarks_response
+            .into_inner()
+            .into_iter()
+            .map(|item| item.into_inner())
+            .for_each(|item| {
+                let value = parse_response(item.element_value.clone());
+                if let Ok(val) = value {
+                    remarks_namespace.insert(item.element_identifier, val);
+                }
+            });
+
+        parsed_response.insert(
+            "int.icao.epl.remarks.1".to_string(),
+            serde_json::to_value(remarks_namespace)?,
+        );
+    }
+
+    if let Some(medical_response) = namespaces.remove("int.icao.epl.medical.1") {
+        medical_response
+            .into_inner()
+            .into_iter()
+            .map(|item| item.into_inner())
+            .for_each(|item| {
+                let value = parse_response(item.element_value.clone());
+                if let Ok(val) = value {
+                    medical_namespace.insert(item.element_identifier, val);
+                }
+            });
+
+        parsed_response.insert(
+            "int.icao.epl.medical.1".to_string(),
+            serde_json::to_value(medical_namespace)?,
+        );
+    }
+
+    if let Some(additional_response) = namespaces.remove("int.icao.epl.additional.1") {
+        additional_response
+            .into_inner()
+            .into_iter()
+            .map(|item| item.into_inner())
+            .for_each(|item| {
+                let value = parse_response(item.element_value.clone());
+                if let Ok(val) = value {
+                    additional_namespace.insert(item.element_identifier, val);
+                }
+            });
+
+        parsed_response.insert(
+            "int.icao.epl.additional.1".to_string(),
+            serde_json::to_value(additional_namespace)?,
+        );
+    }
+
+    if(parsed_response.is_empty()) {
+        return Err(Error::IncorrectNamespace);
+    }
+
+    Ok(parsed_response)
 }
 
 // TODO: Support other namespaces.

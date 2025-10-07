@@ -18,6 +18,7 @@ use p256::ecdsa::VerifyingKey;
 use ssi_jwk::Params;
 use ssi_jwk::JWK as SsiJwk;
 use ssi_jws::Jws as SsiJws;
+use time::OffsetDateTime;
 use std::str::FromStr;
 use jsonwebtokens as jwts;
 use jwts::{raw::{self, TokenSlices}};
@@ -104,6 +105,22 @@ pub fn w3c_device_authentication(
             }
         }
         _ => Err(Error::MdocAuth("Unsupported device_key type".to_string())),
+    }
+}
+
+pub fn check_expiry(document: &Document) -> Result<(), Error> {
+    let mso_bytes = document
+        .issuer_signed
+        .issuer_auth
+        .payload
+        .as_ref()
+        .ok_or(Error::DetachedIssuerAuth)?;
+    let mso: Tag24<Mso> = cbor::from_slice(mso_bytes).map_err(|_| Error::MSOParsing)?;
+    let validity_info = mso.into_inner().validity_info;
+    if validity_info.valid_until.to_utc().gt(&OffsetDateTime::now_utc()) {
+        return Ok(());
+    } else {
+        return Err(Error::CredentialExpired);
     }
 }
 

@@ -39,6 +39,7 @@ use crate::definitions::x509;
 use crate::cose::sign1::PreparedCoseSign1;
 use crate::cose::SignatureAlgorithm;
 use crate::definitions::device_request::ReaderAuth;
+use crate::presentation::authentication::mdoc::check_expiry;
 use crate::presentation::authentication::ResponseAuthenticationOutcomes;
 use crate::{
     cbor::{self, CborError},
@@ -133,6 +134,8 @@ pub enum Error {
     IssuerAuthentication(String),
     #[error("Unable to parse issuer public key")]
     IssuerPublicKey(anyhow::Error),
+    #[error("Credential is expired")]
+    CredentialExpired
 }
 
 impl From<CborError> for Error {
@@ -494,6 +497,15 @@ impl SessionManager {
             response: namespaces,
             ..Default::default()
         };
+
+        match check_expiry(&document) {
+            Ok(_) => {
+                // Do Nothing
+            }
+            Err(e) => {
+                validated_response.errors.insert("expired".to_string(), serde_json::Value::Bool(true));
+            }
+        }
 
         match device_authentication(&document, self.session_transcript.clone()) {
             Ok(_) => {

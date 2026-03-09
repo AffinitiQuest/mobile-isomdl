@@ -73,6 +73,7 @@ pub struct SessionManager {
     sk_reader: [u8; 32],
     reader_message_counter: u32,
     trust_anchor_registry: TrustAnchorRegistry,
+    doc_type: String
 }
 
 #[derive(Serialize, Deserialize)]
@@ -250,6 +251,7 @@ impl SessionManager {
             sk_reader,
             reader_message_counter: 0,
             trust_anchor_registry,
+            doc_type: doc_type.clone()
         };
 
         let request = session_manager
@@ -418,7 +420,7 @@ impl SessionManager {
         };
 
         // Parse all MDOC docs with int.icao.epl.1 doc_type.
-        let document_responses = match parse_documents(&device_response) {
+        let document_responses = match parse_documents(self.doc_type.clone(), &device_response) {
             Ok(document_res) => {
                 document_res
             }
@@ -548,6 +550,7 @@ impl SessionManager {
 }
 
 fn parse_documents(
+    doc_type: String,
     device_response: &DeviceResponse
 ) -> Result<Vec<(&Document, X5Chain, BTreeMap<String, Value>)>, Error> {
     let documents: Vec<(&Document, X5Chain, BTreeMap<String, Value>)> = device_response
@@ -555,7 +558,7 @@ fn parse_documents(
         .as_ref()
         .ok_or(ReaderError::DeviceTransmissionError)?
         .iter()
-        .filter(|doc| doc.doc_type == "int.icao.epl.1".to_string() )
+        .filter(|doc| doc.doc_type == doc_type )
         .map(|doc| parse_document(doc).unwrap())
         .collect();
     return Ok(documents);
@@ -665,16 +668,6 @@ fn _validate_request(namespaces: device_request::Namespaces) -> Result<bool, Err
 fn parse_namespaces_for_doc(
     document: &Document
 ) -> Result<BTreeMap<String, serde_json::Value>, Error> {
-    // let mut core_namespace = BTreeMap::<String, serde_json::Value>::new();
-    // let mut aamva_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut general_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut personnel_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut authority_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut ratings_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut remarks_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut medical_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut additional_namespace = BTreeMap::<String, serde_json::Value>::new();
-
     let mut parsed_response = BTreeMap::<String, serde_json::Value>::new();
     let mut namespaces = document
         .issuer_signed
@@ -684,129 +677,26 @@ fn parse_namespaces_for_doc(
         .clone()
         .into_inner();
 
-    if let Some(general_response) = namespaces.remove("int.icao.epl.general.1") {
-        general_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    general_namespace.insert(item.element_identifier, val);
-                }
-            });
+    let keys: Vec<String> = namespaces.keys().cloned().collect();
+
+    for namespace_name in keys {
+        let mut namespace_fields = BTreeMap::<String, serde_json::Value>::new();
+        if let Some(namespace) = namespaces.remove(&namespace_name) {
+            namespace
+                .into_inner()
+                .into_iter()
+                .map(|item| item.into_inner())
+                .for_each(|item| {
+                    let value = parse_response(item.element_value.clone());
+                    if let Ok(val) = value {
+                        namespace_fields.insert(item.element_identifier, val);
+                    }
+                });            
+        }
 
         parsed_response.insert(
-            "int.icao.epl.general.1".to_string(),
-            serde_json::to_value(general_namespace)?,
-        );
-    }
-
-    if let Some(personnel_response) = namespaces.remove("int.icao.epl.personnel.1") {
-        personnel_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    personnel_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.personnel.1".to_string(),
-            serde_json::to_value(personnel_namespace)?,
-        );
-    }
-
-    if let Some(authority_response) = namespaces.remove("int.icao.epl.authority.1") {
-        authority_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    authority_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.authority.1".to_string(),
-            serde_json::to_value(authority_namespace)?,
-        );
-    }
-
-    if let Some(ratings_response) = namespaces.remove("int.icao.epl.ratings.1") {
-        ratings_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    ratings_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.ratings.1".to_string(),
-            serde_json::to_value(ratings_namespace)?,
-        );
-    }
-
-    if let Some(remarks_response) = namespaces.remove("int.icao.epl.remarks.1") {
-        remarks_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    remarks_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.remarks.1".to_string(),
-            serde_json::to_value(remarks_namespace)?,
-        );
-    }
-
-    if let Some(medical_response) = namespaces.remove("int.icao.epl.medical.1") {
-        medical_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    medical_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.medical.1".to_string(),
-            serde_json::to_value(medical_namespace)?,
-        );
-    }
-
-    if let Some(additional_response) = namespaces.remove("int.icao.epl.additional.1") {
-        additional_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    additional_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.additional.1".to_string(),
-            serde_json::to_value(additional_namespace)?,
+            namespace_name.to_string(),
+            serde_json::to_value(namespace_fields)?,
         );
     }
 
@@ -821,16 +711,6 @@ fn parse_namespaces_for_doc(
 fn parse_namespaces(
     device_response: &DeviceResponse,
 ) -> Result<BTreeMap<String, serde_json::Value>, Error> {
-    // let mut core_namespace = BTreeMap::<String, serde_json::Value>::new();
-    // let mut aamva_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut general_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut personnel_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut authority_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut ratings_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut remarks_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut medical_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut additional_namespace = BTreeMap::<String, serde_json::Value>::new();
-
     let mut parsed_response = BTreeMap::<String, serde_json::Value>::new();
     let mut namespaces = device_response
         .documents
@@ -847,129 +727,26 @@ fn parse_namespaces(
         .clone()
         .into_inner();
 
-    if let Some(general_response) = namespaces.remove("int.icao.epl.general.1") {
-        general_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    general_namespace.insert(item.element_identifier, val);
-                }
-            });
+    let keys: Vec<String> = namespaces.keys().cloned().collect();
+
+    for namespace_name in keys {
+        let mut namespace_fields = BTreeMap::<String, serde_json::Value>::new();
+        if let Some(namespace) = namespaces.remove(&namespace_name) {
+            namespace
+                .into_inner()
+                .into_iter()
+                .map(|item| item.into_inner())
+                .for_each(|item| {
+                    let value = parse_response(item.element_value.clone());
+                    if let Ok(val) = value {
+                        namespace_fields.insert(item.element_identifier, val);
+                    }
+                });            
+        }
 
         parsed_response.insert(
-            "int.icao.epl.general.1".to_string(),
-            serde_json::to_value(general_namespace)?,
-        );
-    }
-
-    if let Some(personnel_response) = namespaces.remove("int.icao.epl.personnel.1") {
-        personnel_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    personnel_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.personnel.1".to_string(),
-            serde_json::to_value(personnel_namespace)?,
-        );
-    }
-
-    if let Some(authority_response) = namespaces.remove("int.icao.epl.authority.1") {
-        authority_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    authority_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.authority.1".to_string(),
-            serde_json::to_value(authority_namespace)?,
-        );
-    }
-
-    if let Some(ratings_response) = namespaces.remove("int.icao.epl.ratings.1") {
-        ratings_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    ratings_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.ratings.1".to_string(),
-            serde_json::to_value(ratings_namespace)?,
-        );
-    }
-
-    if let Some(remarks_response) = namespaces.remove("int.icao.epl.remarks.1") {
-        remarks_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    remarks_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.remarks.1".to_string(),
-            serde_json::to_value(remarks_namespace)?,
-        );
-    }
-
-    if let Some(medical_response) = namespaces.remove("int.icao.epl.medical.1") {
-        medical_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    medical_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.medical.1".to_string(),
-            serde_json::to_value(medical_namespace)?,
-        );
-    }
-
-    if let Some(additional_response) = namespaces.remove("int.icao.epl.additional.1") {
-        additional_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    additional_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.additional.1".to_string(),
-            serde_json::to_value(additional_namespace)?,
+            namespace_name.to_string(),
+            serde_json::to_value(namespace_fields)?,
         );
     }
 

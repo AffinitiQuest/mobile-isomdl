@@ -47,7 +47,7 @@ use crate::{
         device_engagement::DeviceRetrievalMethod,
         device_key::cose_key::Error as CoseError,
         device_request::{self, DeviceRequest, DocRequest, ItemsRequest},
-        device_response::{Document},
+        device_response::{Document, MdocDocument},
         helpers::{non_empty_vec, NonEmptyVec, Tag24},
         session::{
             self, create_p256_ephemeral_keys, derive_session_key, get_shared_secret, Handover,
@@ -419,80 +419,67 @@ impl SessionManager {
             }
         };
 
-        // Parse all MDOC docs with int.icao.epl.1 doc_type.
-        let document_responses = match parse_documents(self.doc_type.clone(), &device_response) {
-            Ok(document_res) => {
-                document_res
-            }
-            Err(e) => {
+        let documents = match device_response.documents.as_ref() {
+            Some(docs) => docs,
+            None => {
                 validated_responses.errors.insert(
                     "parsing_errors".to_string(),
-                    json!(vec![format!("{e:?}")]),
+                    json!(vec![format!("{:?}", Error::DeviceTransmissionError)]),
                 );
-                
-                // If there exists some w3c docs, try to validate them.
-                if let Some(_w3c_docs) = device_response.w3c_documents {
-                    let mut w3c_document = BTreeMap::new();
-                    if let Some(_first_document) = _w3c_docs.first() {
-                        let mut validated_response = ResponseAuthenticationOutcome::default();
-
-                        w3c_document.insert("doc_type".to_string(), _first_document.doc_type.to_string());
-                        w3c_document.insert("jwt".to_string(), _first_document.jwt.to_string());
-                        
-                        match w3c_device_authentication(_first_document, self.session_transcript.clone()) {
-                            Ok(()) => {
-                                validated_responses.errors.clear();
-                                validated_response.device_authentication = AuthenticationStatus::Valid
-                            }
-                            Err(e) => {
-                                validated_response.device_authentication = AuthenticationStatus::Invalid;
-                                validated_response.errors.insert(
-                                    "device_authentication_errors".to_string(),
-                                    json!(vec![format!("{e:?}")]),
-                                );
-                            }
-                        }
-                        let v = json!(&w3c_document);
-                        validated_response
-                            .response
-                            .insert("w3c_documents".to_string(), v);
-                        validated_responses.responses.push(validated_response);
-                        
-                        return validated_responses
-                    } else {
-                        return validated_responses
-                    }
-                } else {
-                    return validated_responses
-                }
+                return validated_responses;
             }
         };
 
-        println!("Number of parsed documents: {:#?}", document_responses.len());
+        for document in documents.iter() {
+            match document {
+                Document::MsoMdoc(mdoc) if mdoc.doc_type == self.doc_type => {
+                    match parse_mdoc_document(mdoc) {
+                        Ok((x5chain, namespaces)) => {
+                            let validated = self.validate_mdoc_response(x5chain, mdoc, namespaces);
+                            validated_responses.responses.push(validated);
+                        }
+                        Err(e) => {
+                            validated_responses.errors.insert(
+                                "parsing_errors".to_string(),
+                                json!(vec![format!("{e:?}")]),
+                            );
+                        }
+                    }
+                }
+                Document::MsoMdoc(_) => {
+                    // doc_type doesn't match — skip
+                }
+                Document::W3cVc(w3c) => {
+                    let mut validated_response = ResponseAuthenticationOutcome::default();
+                    let mut response_fields = BTreeMap::new();
+                    response_fields.insert("doc_type".to_string(), w3c.doc_type.clone());
+                    response_fields.insert("jwt".to_string(), w3c.jwt.clone());
 
-        //validate MDOCs.
-        for document in document_responses.iter() {
-            let validated_response = self.validate_response(document.1.clone(), document.0.clone(), document.2.clone());
-            validated_responses.responses.push(validated_response);
+                    match w3c_device_authentication(w3c, self.session_transcript.clone()) {
+                        Ok(()) => {
+                            validated_response.device_authentication = AuthenticationStatus::Valid;
+                        }
+                        Err(e) => {
+                            validated_response.device_authentication = AuthenticationStatus::Invalid;
+                            validated_response.errors.insert(
+                                "device_authentication_errors".to_string(),
+                                json!(vec![format!("{e:?}")]),
+                            );
+                        }
+                    }
+                    validated_response.response.insert("document".to_string(), json!(response_fields));
+                    validated_responses.responses.push(validated_response);
+                }
+            }
         }
 
-        // let validated_doc_responses: Vec<ResponseAuthenticationOutcome> = document_responses
-        //     .iter()
-        //     .map(|document| {
-        //         let validated_response = self.validate_response(document.1.clone(), document.0.clone(), document.2.clone());
-        //         validated_responses.responses.push(validated_response);
-        //         println!("Number of parsed documents: {:#?}", validated_responses.responses.len());
-        //     })
-        //     .collect();
-
-        println!("Number of parsed documents: {:#?}", validated_responses.responses.len());
-        return validated_responses
+        validated_responses
     }
 
-    fn validate_response(
+    fn validate_mdoc_response(
         &mut self,
         x5chain: X5Chain,
-        document: Document,
+        document: &MdocDocument,
         namespaces: BTreeMap<String, serde_json::Value>,
     ) -> ResponseAuthenticationOutcome {
         let mut validated_response = ResponseAuthenticationOutcome {
@@ -500,16 +487,11 @@ impl SessionManager {
             ..Default::default()
         };
 
-        match check_expiry(&document) {
-            Ok(_) => {
-                // Do Nothing
-            }
-            Err(e) => {
-                validated_response.errors.insert("expired".to_string(), serde_json::Value::Bool(true));
-            }
+        if let Err(_) = check_expiry(document) {
+            validated_response.errors.insert("expired".to_string(), serde_json::Value::Bool(true));
         }
 
-        match device_authentication(&document, self.session_transcript.clone()) {
+        match device_authentication(document, self.session_transcript.clone()) {
             Ok(_) => {
                 validated_response.device_authentication = AuthenticationStatus::Valid;
             }
@@ -544,29 +526,13 @@ impl SessionManager {
                 .insert("certificate_errors".to_string(), json!(validation_errors));
             validated_response.issuer_authentication = AuthenticationStatus::Invalid
         };
-        println!("Validated Response");
         validated_response
     }
 }
 
-fn parse_documents(
-    doc_type: String,
-    device_response: &DeviceResponse
-) -> Result<Vec<(&Document, X5Chain, BTreeMap<String, Value>)>, Error> {
-    let documents: Vec<(&Document, X5Chain, BTreeMap<String, Value>)> = device_response
-        .documents
-        .as_ref()
-        .ok_or(ReaderError::DeviceTransmissionError)?
-        .iter()
-        .filter(|doc| doc.doc_type == doc_type )
-        .map(|doc| parse_document(doc).unwrap())
-        .collect();
-    return Ok(documents);
-}
-
-fn parse_document(
-    document: &Document,
-) -> Result<(&Document, X5Chain, BTreeMap<String, Value>), Error> {
+fn parse_mdoc_document(
+    document: &MdocDocument,
+) -> Result<(X5Chain, BTreeMap<String, Value>), Error> {
     let header = document.issuer_signed.issuer_auth.unprotected.clone();
     let x5chain = header
         .rest
@@ -576,25 +542,8 @@ fn parse_document(
         .map(X5Chain::from_cbor)
         .ok_or(Error::X5ChainMissing)?
         .map_err(Error::X5ChainParsing)?;
-    let parsed_response = parse_namespaces_for_doc(document)?;
-    Ok((document, x5chain, parsed_response))
-}
-
-fn parse(
-    device_response: &DeviceResponse,
-) -> Result<(&Document, X5Chain, BTreeMap<String, Value>), Error> {
-    let document = get_document(device_response)?;
-    let header = document.issuer_signed.issuer_auth.unprotected.clone();
-    let x5chain = header
-        .rest
-        .iter()
-        .find(|(label, _)| label == &Label::Int(X5CHAIN_COSE_HEADER_LABEL))
-        .map(|(_, value)| value.to_owned())
-        .map(X5Chain::from_cbor)
-        .ok_or(Error::X5ChainMissing)?
-        .map_err(Error::X5ChainParsing)?;
-    let parsed_response = parse_namespaces(device_response)?;
-    Ok((document, x5chain, parsed_response))
+    let namespaces = parse_namespaces_for_doc(document)?;
+    Ok((x5chain, namespaces))
 }
 
 fn parse_response(value: ciborium::Value) -> Result<Value, Error> {
@@ -633,16 +582,6 @@ fn parse_response(value: ciborium::Value) -> Result<Value, Error> {
     }
 }
 
-fn get_document(device_response: &DeviceResponse) -> Result<&Document, Error> {
-    device_response
-        .documents
-        .as_ref()
-        .ok_or(ReaderError::DeviceTransmissionError)?
-        .iter()
-        .find(|doc| doc.doc_type == "int.icao.epl.1")
-        .ok_or(ReaderError::DocumentTypeError)
-}
-
 fn _validate_request(namespaces: device_request::Namespaces) -> Result<bool, Error> {
     // TODO: Check country name of certificate matches mdl
 
@@ -666,60 +605,10 @@ fn _validate_request(namespaces: device_request::Namespaces) -> Result<bool, Err
 }
 
 fn parse_namespaces_for_doc(
-    document: &Document
+    document: &MdocDocument,
 ) -> Result<BTreeMap<String, serde_json::Value>, Error> {
     let mut parsed_response = BTreeMap::<String, serde_json::Value>::new();
     let mut namespaces = document
-        .issuer_signed
-        .namespaces
-        .as_ref()
-        .ok_or(Error::NoMdlDataTransmission)?
-        .clone()
-        .into_inner();
-
-    let keys: Vec<String> = namespaces.keys().cloned().collect();
-
-    for namespace_name in keys {
-        let mut namespace_fields = BTreeMap::<String, serde_json::Value>::new();
-        if let Some(namespace) = namespaces.remove(&namespace_name) {
-            namespace
-                .into_inner()
-                .into_iter()
-                .map(|item| item.into_inner())
-                .for_each(|item| {
-                    let value = parse_response(item.element_value.clone());
-                    if let Ok(val) = value {
-                        namespace_fields.insert(item.element_identifier, val);
-                    }
-                });            
-        }
-
-        parsed_response.insert(
-            namespace_name.to_string(),
-            serde_json::to_value(namespace_fields)?,
-        );
-    }
-
-    if(parsed_response.is_empty()) {
-        return Err(Error::IncorrectNamespace);
-    }
-
-    Ok(parsed_response)
-}
-
-// TODO: Support other namespaces.
-fn parse_namespaces(
-    device_response: &DeviceResponse,
-) -> Result<BTreeMap<String, serde_json::Value>, Error> {
-    let mut parsed_response = BTreeMap::<String, serde_json::Value>::new();
-    let mut namespaces = device_response
-        .documents
-        .as_ref()
-        .ok_or(Error::DeviceTransmissionError)?
-        .iter()
-        //.find(|doc| doc.doc_type == "org.iso.18013.5.1.mDL")
-        .find(|doc| doc.doc_type == "int.icao.epl.1")
-        .ok_or(Error::DocumentTypeError)?
         .issuer_signed
         .namespaces
         .as_ref()

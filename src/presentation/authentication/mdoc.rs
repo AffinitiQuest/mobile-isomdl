@@ -1,7 +1,7 @@
 use crate::cbor;
 use crate::cose;
-use crate::definitions::device_response::Document;
-use crate::definitions::device_response::W3CDocument;
+use crate::definitions::device_response::MdocDocument;
+use crate::definitions::device_response::W3cVcDocument;
 use crate::definitions::issuer_signed;
 use crate::definitions::x509::X5Chain;
 use crate::definitions::DeviceAuth;
@@ -37,7 +37,7 @@ pub fn issuer_authentication(x5chain: X5Chain, issuer_signed: &IssuerSigned) -> 
 }
 
 pub fn w3c_device_authentication(
-    document: &W3CDocument,
+    document: &W3cVcDocument,
     session_transcript: SessionTranscript180135,
 ) -> Result<(), Error> {
     let jwt = document.jwt.clone();
@@ -108,7 +108,7 @@ pub fn w3c_device_authentication(
     }
 }
 
-pub fn check_expiry(document: &Document) -> Result<(), Error> {
+pub fn check_expiry(document: &MdocDocument) -> Result<(), Error> {
     let mso_bytes = document
         .issuer_signed
         .issuer_auth
@@ -125,7 +125,7 @@ pub fn check_expiry(document: &Document) -> Result<(), Error> {
 }
 
 pub fn device_authentication(
-    document: &Document,
+    document: &MdocDocument,
     session_transcript: SessionTranscript180135,
 ) -> Result<(), Error> {
     let mso_bytes = document

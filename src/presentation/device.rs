@@ -23,8 +23,8 @@ use crate::{
         device_engagement::{DeviceRetrievalMethod, Security, ServerRetrievalMethods},
         device_request::{DeviceRequest, DocRequest, ItemsRequest},
         device_response::{
-            Document as DeviceResponseDoc, DocumentError, DocumentErrorCode, DocumentErrors,
-            Errors as NamespaceErrors, Status,
+            Document as ResponseDocument, MdocDocument as DeviceResponseDoc, DocumentError,
+            DocumentErrorCode, DocumentErrors, Errors as NamespaceErrors, Status,
         },
         device_signed::{
             DeviceAuth, DeviceAuthType, DeviceAuthentication, DeviceNamespacesBytes, DeviceSigned,
@@ -190,7 +190,7 @@ pub struct Document {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreparedDeviceResponse {
     pub prepared_documents: Vec<PreparedDocument>,
-    pub signed_documents: Vec<DeviceResponseDoc>,
+    pub signed_documents: Vec<ResponseDocument>,
     pub document_errors: Option<DocumentErrors>,
     pub status: Status,
 }
@@ -720,7 +720,6 @@ impl PreparedDeviceResponse {
         DeviceResponse {
             version: DeviceResponse::VERSION.into(),
             documents: self.signed_documents.try_into().ok(),
-            w3c_documents: None,
             document_errors: self.document_errors,
             status: self.status,
         }
@@ -728,7 +727,7 @@ impl PreparedDeviceResponse {
 }
 
 impl PreparedDocument {
-    fn finalize(self, signature: Vec<u8>) -> DeviceResponseDoc {
+    fn finalize(self, signature: Vec<u8>) -> ResponseDocument {
         let Self {
             issuer_signed,
             device_namespaces,
@@ -745,12 +744,12 @@ impl PreparedDocument {
             namespaces: device_namespaces,
             device_auth,
         };
-        DeviceResponseDoc {
+        ResponseDocument::MsoMdoc(DeviceResponseDoc {
             doc_type,
             issuer_signed,
             device_signed,
             errors,
-        }
+        })
     }
 }
 

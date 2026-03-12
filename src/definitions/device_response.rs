@@ -19,10 +19,6 @@ pub struct DeviceResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub documents: Option<Documents>,
 
-    /// The documents associated with the response, if any.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub w3c_documents: Option<W3CDocuments>,
-
     /// The errors associated with the documents, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub document_errors: Option<DocumentErrors>,
@@ -32,46 +28,87 @@ pub struct DeviceResponse {
 }
 
 pub type Documents = NonEmptyVec<Document>;
-pub type W3CDocuments = NonEmptyVec<W3CDocument>;
 
-/// Represents a document.
+/// A unified document covering all supported credential formats.
 ///
-/// This struct is used to store information about a document.
+/// Serializes untagged (inner struct bytes only). Deserializes by inspecting
+/// the CBOR map for the `"jwt"` key to pick the right variant, since ciborium
+/// does not support `#[serde(untagged)]` deserialization.
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub enum Document {
+    MsoMdoc(MdocDocument),
+    W3cVc(W3cVcDocument),
+}
+
+impl<'de> Deserialize<'de> for Document {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        // Capture the full CBOR value so we can inspect keys before picking a variant.
+        let value = ciborium::Value::deserialize(deserializer)?;
+        let has_jwt = if let ciborium::Value::Map(ref map) = value {
+            map.iter()
+                .any(|(k, _)| matches!(k, ciborium::Value::Text(s) if s == "jwt"))
+        } else {
+            return Err(D::Error::custom("expected a CBOR map for Document"));
+        };
+        // Re-encode to bytes so we can deserialize into the concrete type.
+        let bytes = crate::cbor::to_vec(&value).map_err(|e| D::Error::custom(e.to_string()))?;
+        if has_jwt {
+            crate::cbor::from_slice::<W3cVcDocument>(&bytes)
+                .map(Document::W3cVc)
+                .map_err(|e| D::Error::custom(e.to_string()))
+        } else {
+            crate::cbor::from_slice::<MdocDocument>(&bytes)
+                .map(Document::MsoMdoc)
+                .map_err(|e| D::Error::custom(e.to_string()))
+        }
+    }
+}
+
+impl Document {
+    pub fn doc_type(&self) -> &str {
+        match self {
+            Document::MsoMdoc(d) => &d.doc_type,
+            Document::W3cVc(d) => &d.doc_type,
+        }
+    }
+}
+
+/// An ISO mDL / MSOMDOC credential.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Document {
+pub struct MdocDocument {
     /// A string representing the type of the document.
     pub doc_type: String,
 
-    /// An instance of the [IssuerSigned] struct representing the issuer-signed data.
+    /// Issuer-signed data.
     pub issuer_signed: IssuerSigned,
 
-    /// An instance of the [DeviceSigned] struct representing the device-signed data.
+    /// Device-signed data (not serialized in responses).
     #[serde(skip_serializing)]
     pub device_signed: DeviceSigned,
 
-    /// An optional instance of the [Errors] struct representing any errors associated with the document.
+    /// Errors associated with the document, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub errors: Option<Errors>,
 }
 
-/// Represents a W3C document.
-///
-/// This struct is used to store information about a document.
+/// A W3C VC / SD-JWT credential.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct W3CDocument {
+pub struct W3cVcDocument {
     /// A string representing the type of the document.
     pub doc_type: String,
 
-    /// An instance of the [IssuerSigned] struct representing the issuer-signed data.
+    /// The JWT string carrying the credential.
     pub jwt: String,
 
-    /// An instance of the [DeviceSigned] struct representing the device-signed data.
+    /// Device authentication data (not serialized in responses).
     #[serde(skip_serializing)]
     pub device_auth: DeviceAuth,
 
-    /// An optional instance of the [Errors] struct representing any errors associated with the document.
+    /// Errors associated with the document, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub errors: Option<Errors>,
 }
@@ -162,6 +199,7 @@ mod test {
     use crate::definitions::{
         DeviceAuth, DeviceSigned, DigestId, Document, IssuerSigned, IssuerSignedItem,
     };
+    use super::MdocDocument;
     use coset::{CoseMac0, CoseSign1};
     use hex::FromHex;
 
@@ -210,7 +248,7 @@ mod test {
         let mut device_namespaces = DeviceNamespaces::new();
         device_namespaces.insert("a".to_string(), device_signed_items);
         let device_namespaces_bytes = DeviceNamespacesBytes::new(device_namespaces).unwrap();
-        let doc = Document {
+        let doc = Document::MsoMdoc(MdocDocument {
             doc_type: "aaa".to_string(),
             issuer_signed: IssuerSigned {
                 namespaces: Some(issuer_namespaces),
@@ -221,7 +259,7 @@ mod test {
                 device_auth: DeviceAuth::DeviceMac(cose_mac0),
             },
             errors: None,
-        };
+        });
         let docs = Documents::new(doc);
         let document_error_code = DocumentErrorCode::DataNotReturned;
         let mut error = DocumentError::new();
@@ -230,7 +268,6 @@ mod test {
         let res = DeviceResponse {
             version: "1.0".to_string(),
             documents: Some(docs),
-            w3c_documents: None,
             document_errors: Some(errors),
             status: Status::OK,
         };

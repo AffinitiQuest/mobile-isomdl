@@ -17,7 +17,6 @@ use p256::ecdsa::Signature;
 use p256::ecdsa::VerifyingKey;
 use ssi_jwk::Params;
 use ssi_jwk::JWK as SsiJwk;
-use ssi_jws::Jws as SsiJws;
 use time::OffsetDateTime;
 use std::str::FromStr;
 use jsonwebtokens as jwts;
@@ -41,23 +40,29 @@ pub fn w3c_device_authentication(
     session_transcript: SessionTranscript180135,
 ) -> Result<(), Error> {
     let jwt = document.jwt.clone();
-    let jws: std::result::Result<&SsiJws, ssi_jws::InvalidJws<&str>> = SsiJws::from_str_const(&jwt);
-    println!("JWS: {:#?}", jws.unwrap().decode().unwrap());
-    
-    let TokenSlices{claims,..} = raw::split_token(&jwt).map_err(|_| Error::ParsingError)?;// .expect("Error Slicing the token");
+    // SD-JWT format: base_jwt~disclosure1~...~kb_jwt — extract only the base JWT.
+    let base_jwt = jwt.split('~').next().unwrap_or(&jwt);
+
+    let TokenSlices{claims,..} = raw::split_token(base_jwt).map_err(|_| Error::ParsingError)?;
     let raw_claim = raw::decode_json_token_slice(claims).map_err(|_| Error::ParsingError)?;
     
     let payload_object= raw_claim.as_object().ok_or(Error::ParsingError)?;
-    let vc = payload_object["vc"].as_object().ok_or(Error::ParsingError)?;
-    let credential_subject = vc["credentialSubject"].as_object().ok_or(Error::ParsingError)?;
-    let jwk = credential_subject["id"].as_str().ok_or(Error::ParsingError)?;
-    
-    let key_part = &jwk[8..];
-    
-    let jwk_values = base64_url::decode(key_part).map_err(|_| Error::ParsingError)?;
-    
-    let binding_key_jwk_val = String::from_utf8(jwk_values).map_err(|_| Error::ParsingError)?;
-    let binding_key_jwk:SsiJwk = SsiJwk::from_str(&binding_key_jwk_val).map_err(|_| Error::ParsingError)?;
+
+    // Support two key-binding formats:
+    //  - SD-JWT VC (draft-ietf-oauth-sd-jwt-vc): device key in cnf.jwk (RFC 7800)
+    //  - VCDM 1.1 JWT-VC: device key in vc.credentialSubject.id as a did:jwk URI
+    let binding_key_jwk: SsiJwk = if let Some(cnf) = payload_object.get("cnf") {
+        let jwk_val = cnf.get("jwk").ok_or(Error::ParsingError)?;
+        serde_json::from_value(jwk_val.clone()).map_err(|_| Error::ParsingError)?
+    } else {
+        let vc = payload_object.get("vc").and_then(|v| v.as_object()).ok_or(Error::ParsingError)?;
+        let credential_subject = vc.get("credentialSubject").and_then(|v| v.as_object()).ok_or(Error::ParsingError)?;
+        let jwk_did = credential_subject.get("id").and_then(|v| v.as_str()).ok_or(Error::ParsingError)?;
+        let key_part = jwk_did.get(8..).ok_or(Error::ParsingError)?; // strip "did:jwk:"
+        let jwk_bytes = base64_url::decode(key_part).map_err(|_| Error::ParsingError)?;
+        let jwk_str = String::from_utf8(jwk_bytes).map_err(|_| Error::ParsingError)?;
+        SsiJwk::from_str(&jwk_str).map_err(|_| Error::ParsingError)?
+    };
     
     match binding_key_jwk.params {
         Params::EC(p) => {
@@ -78,7 +83,6 @@ pub fn w3c_device_authentication(
             let device_auth: &DeviceAuth = &document.device_auth;
             match device_auth {
                 DeviceAuth::DeviceSignature(device_signature) => {
-                    println!("{:#?}", device_signature);
                     let detached_payload = Tag24::new(W3CDeviceAuthentication::new(
                         session_transcript,
                         document.doc_type.clone(),
@@ -91,7 +95,6 @@ pub fn w3c_device_authentication(
                         Some(&cbor_payload),
                         external_aad,
                     );
-                    println!("{:#?}", result);
                     if !result.is_success() {
                         Err(Error::ParsingError)?
                     } else {

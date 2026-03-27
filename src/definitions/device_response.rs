@@ -48,7 +48,7 @@ impl<'de> Deserialize<'de> for Document {
         let value = ciborium::Value::deserialize(deserializer)?;
         let has_jwt = if let ciborium::Value::Map(ref map) = value {
             map.iter()
-                .any(|(k, _)| matches!(k, ciborium::Value::Text(s) if s == "jwt"))
+                .any(|(k, _)| matches!(k, ciborium::Value::Text(s) if s == "jwt" || s == "sdJwt"))
         } else {
             return Err(D::Error::custom("expected a CBOR map for Document"));
         };
@@ -102,6 +102,8 @@ pub struct W3cVcDocument {
     pub doc_type: String,
 
     /// The JWT string carrying the credential.
+    /// Accepts both "jwt" (JWT-VC) and "sdJwt" (SD-JWT) as the CBOR key name.
+    #[serde(alias = "sdJwt")]
     pub jwt: String,
 
     /// Device authentication data (not serialized in responses).

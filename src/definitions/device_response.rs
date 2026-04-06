@@ -32,13 +32,15 @@ pub type Documents = NonEmptyVec<Document>;
 /// A unified document covering all supported credential formats.
 ///
 /// Serializes untagged (inner struct bytes only). Deserializes by inspecting
-/// the CBOR map for the `"jwt"` key to pick the right variant, since ciborium
-/// does not support `#[serde(untagged)]` deserialization.
+/// the CBOR map for the `"jwt"` / `"sdJwt"` / `"ldpVc"` keys to pick the
+/// right variant, since ciborium does not support `#[serde(untagged)]`
+/// deserialization.
 #[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
 pub enum Document {
     MsoMdoc(MdocDocument),
     W3cVc(W3cVcDocument),
+    LdpVc(LdpVcDocument),
 }
 
 impl<'de> Deserialize<'de> for Document {
@@ -46,15 +48,22 @@ impl<'de> Deserialize<'de> for Document {
         use serde::de::Error;
         // Capture the full CBOR value so we can inspect keys before picking a variant.
         let value = ciborium::Value::deserialize(deserializer)?;
-        let has_jwt = if let ciborium::Value::Map(ref map) = value {
-            map.iter()
-                .any(|(k, _)| matches!(k, ciborium::Value::Text(s) if s == "jwt" || s == "sdJwt"))
+        let (has_jwt, has_ldp_vc) = if let ciborium::Value::Map(ref map) = value {
+            let has_jwt = map.iter()
+                .any(|(k, _)| matches!(k, ciborium::Value::Text(s) if s == "jwt" || s == "sdJwt"));
+            let has_ldp_vc = map.iter()
+                .any(|(k, _)| matches!(k, ciborium::Value::Text(s) if s == "ldpVc"));
+            (has_jwt, has_ldp_vc)
         } else {
             return Err(D::Error::custom("expected a CBOR map for Document"));
         };
         // Re-encode to bytes so we can deserialize into the concrete type.
         let bytes = crate::cbor::to_vec(&value).map_err(|e| D::Error::custom(e.to_string()))?;
-        if has_jwt {
+        if has_ldp_vc {
+            crate::cbor::from_slice::<LdpVcDocument>(&bytes)
+                .map(Document::LdpVc)
+                .map_err(|e| D::Error::custom(e.to_string()))
+        } else if has_jwt {
             crate::cbor::from_slice::<W3cVcDocument>(&bytes)
                 .map(Document::W3cVc)
                 .map_err(|e| D::Error::custom(e.to_string()))
@@ -71,6 +80,7 @@ impl Document {
         match self {
             Document::MsoMdoc(d) => &d.doc_type,
             Document::W3cVc(d) => &d.doc_type,
+            Document::LdpVc(d) => &d.doc_type,
         }
     }
 }
@@ -109,6 +119,21 @@ pub struct W3cVcDocument {
     /// Device authentication data (not serialized in responses).
     #[serde(skip_serializing)]
     pub device_auth: DeviceAuth,
+
+    /// Errors associated with the document, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errors: Option<Errors>,
+}
+
+/// An LDP-VC credential presented over BLE.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LdpVcDocument {
+    /// A string representing the type of the document.
+    pub doc_type: String,
+
+    /// The JSON-encoded Verifiable Presentation wrapping the credential.
+    pub ldp_vc: String,
 
     /// Errors associated with the document, if any.
     #[serde(skip_serializing_if = "Option::is_none")]

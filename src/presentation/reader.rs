@@ -31,7 +31,7 @@ use p256::ecdsa::{Signature, SigningKey};
 use p256::{SecretKey};
 
 use super::authentication::{
-    mdoc::{device_authentication, w3c_device_authentication, issuer_authentication},
+    mdoc::{device_authentication, ldp_vc_device_authentication, w3c_device_authentication, issuer_authentication},
     AuthenticationStatus, ResponseAuthenticationOutcome,
 };
 
@@ -73,7 +73,8 @@ pub struct SessionManager {
     sk_reader: [u8; 32],
     reader_message_counter: u32,
     trust_anchor_registry: TrustAnchorRegistry,
-    doc_type: String
+    doc_type: String,
+    format: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -136,7 +137,9 @@ pub enum Error {
     #[error("Unable to parse issuer public key")]
     IssuerPublicKey(anyhow::Error),
     #[error("Credential is expired")]
-    CredentialExpired
+    CredentialExpired,
+    #[error("Returned credential format does not match requested format")]
+    UnexpectedFormat,
 }
 
 impl From<CborError> for Error {
@@ -251,7 +254,8 @@ impl SessionManager {
             sk_reader,
             reader_message_counter: 0,
             trust_anchor_registry,
-            doc_type: doc_type.clone()
+            doc_type: doc_type.clone(),
+            format: format.clone(),
         };
 
         let request = session_manager
@@ -431,6 +435,22 @@ impl SessionManager {
         };
 
         for document in documents.iter() {
+            if !format_matches_document(&self.format, document) {
+                println!(
+                    "[handle_response] format mismatch: requested={:?}, received={}",
+                    self.format,
+                    match document {
+                        Document::MsoMdoc(_) => "MsoMdoc",
+                        Document::W3cVc(_) => "W3cVc",
+                        Document::LdpVc(_) => "LdpVc",
+                    }
+                );
+                validated_responses.errors.insert(
+                    "format_errors".to_string(),
+                    json!(vec![format!("{:?}", Error::UnexpectedFormat)]),
+                );
+                continue;
+            }
             match document {
                 Document::MsoMdoc(mdoc) if mdoc.doc_type == self.doc_type => {
                     match parse_mdoc_document(mdoc) {
@@ -456,6 +476,27 @@ impl SessionManager {
                     response_fields.insert("jwt".to_string(), w3c.jwt.clone());
 
                     match w3c_device_authentication(w3c, self.session_transcript.clone()) {
+                        Ok(()) => {
+                            validated_response.device_authentication = AuthenticationStatus::Valid;
+                        }
+                        Err(e) => {
+                            validated_response.device_authentication = AuthenticationStatus::Invalid;
+                            validated_response.errors.insert(
+                                "device_authentication_errors".to_string(),
+                                json!(vec![format!("{e:?}")]),
+                            );
+                        }
+                    }
+                    validated_response.response.insert("document".to_string(), json!(response_fields));
+                    validated_responses.responses.push(validated_response);
+                }
+                Document::LdpVc(ldp_vc_doc) => {
+                    let mut validated_response = ResponseAuthenticationOutcome::default();
+                    let mut response_fields = BTreeMap::new();
+                    response_fields.insert("doc_type".to_string(), ldp_vc_doc.doc_type.clone());
+                    response_fields.insert("ldp_vc".to_string(), ldp_vc_doc.ldp_vc.clone());
+
+                    match ldp_vc_device_authentication(ldp_vc_doc, self.session_transcript.clone()) {
                         Ok(()) => {
                             validated_response.device_authentication = AuthenticationStatus::Valid;
                         }
@@ -527,6 +568,16 @@ impl SessionManager {
             validated_response.issuer_authentication = AuthenticationStatus::Invalid
         };
         validated_response
+    }
+}
+
+fn format_matches_document(format: &str, document: &Document) -> bool {
+    match (format, document) {
+        ("mdoc", Document::MsoMdoc(_)) => true,
+        ("w3cjwt", Document::W3cVc(_)) => true,
+        ("sd-jwt", Document::W3cVc(_)) => true,
+        ("ldp_vc", Document::LdpVc(_)) => true,
+        _ => false,
     }
 }
 

@@ -1,5 +1,6 @@
 use crate::cbor;
 use crate::cose;
+use crate::definitions::device_response::LdpVcDocument;
 use crate::definitions::device_response::MdocDocument;
 use crate::definitions::device_response::W3cVcDocument;
 use crate::definitions::issuer_signed;
@@ -109,6 +110,137 @@ pub fn w3c_device_authentication(
         }
         _ => Err(Error::MdocAuth("Unsupported device_key type".to_string())),
     }
+}
+
+/// Recursively sort all JSON object keys in Unicode code-point order,
+/// producing a value suitable for JCS (RFC 8785) canonicalization.
+fn jcs_sort(value: &serde_json::Value) -> serde_json::Value {
+    use std::collections::BTreeMap;
+    match value {
+        serde_json::Value::Object(map) => {
+            let sorted: BTreeMap<_, _> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), jcs_sort(v)))
+                .collect();
+            serde_json::Value::Object(sorted.into_iter().collect())
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(jcs_sort).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+pub fn ldp_vc_device_authentication(
+    document: &LdpVcDocument,
+    session_transcript: SessionTranscript180135,
+) -> Result<(), Error> {
+    use sha2::{Sha256, Digest};
+
+    // Step 1: Compute expected challenge = hex(SHA-256(Tag24(session_transcript))).
+    // The wallet holds the session transcript as Tag24-encoded CBOR bytes (the form
+    // used throughout ISO 18013-5), so we must wrap in Tag24 before hashing.
+    let transcript_cbor = crate::cbor::to_vec(
+        &Tag24::new(session_transcript).map_err(|_| Error::CborDecodingError)?
+    ).map_err(|_| Error::CborDecodingError)?;
+    let expected_challenge = hex::encode(Sha256::digest(&transcript_cbor));
+
+    // Step 2: Parse the VP JSON stored in ldp_vc.
+    let vp: serde_json::Value = serde_json::from_str(&document.ldp_vc)
+        .map_err(|_| Error::ParsingError)?;
+
+    // Step 3: Extract the outer VP proof and validate the challenge.
+    let proof = vp.get("proof").ok_or(Error::ParsingError)?;
+    let challenge = proof.get("challenge").and_then(|v| v.as_str()).ok_or(Error::ParsingError)?;
+    if challenge != expected_challenge {
+        return Err(Error::MdocAuth(format!(
+            "VP challenge mismatch: got {challenge}, expected {expected_challenge}"
+        )));
+    }
+
+    // Step 4: Extract the holder JWK from the did:jwk: verificationMethod.
+    // Format: "did:jwk:<base64url-JWK>#0"
+    let vm = proof.get("verificationMethod").and_then(|v| v.as_str()).ok_or(Error::ParsingError)?;
+    let did_part = vm.split('#').next().ok_or(Error::ParsingError)?;
+    if !did_part.starts_with("did:jwk:") {
+        return Err(Error::MdocAuth("VP verificationMethod must be a did:jwk DID".to_string()));
+    }
+    let key_b64 = &did_part[8..];
+    let jwk_bytes = base64_url::decode(key_b64).map_err(|_| Error::ParsingError)?;
+    let jwk_str = String::from_utf8(jwk_bytes).map_err(|_| Error::ParsingError)?;
+    let holder_jwk: SsiJwk = SsiJwk::from_str(&jwk_str).map_err(|_| Error::ParsingError)?;
+
+    // Step 5: Build a P-256 verifying key from the holder JWK.
+    let verifying_key = match holder_jwk.params {
+        Params::EC(ref p) => {
+            let x = p.x_coordinate.as_ref().ok_or(Error::ParsingError)?;
+            let y = p.y_coordinate.as_ref().ok_or(Error::ParsingError)?;
+            let encoded_point = p256::EncodedPoint::from_affine_coordinates(
+                GenericArray::from_slice(x.0.as_slice()),
+                GenericArray::from_slice(y.0.as_slice()),
+                false,
+            );
+            VerifyingKey::from_encoded_point(&encoded_point).map_err(|_| Error::ParsingError)?
+        }
+        _ => return Err(Error::MdocAuth("VP holder key must be P-256 EC".to_string())),
+    };
+
+    // Step 6: Build verification data per ecdsa-jcs-2019 spec.
+    // proofConfig = proof object without proofValue, plus @context from the VP.
+    // unsecuredDocument = VP without proof field.
+    // hashData = SHA-256(JCS(proofConfig)) || SHA-256(JCS(unsecuredDocument))
+    //
+    // serde_json without the preserve_order feature uses BTreeMap, giving
+    // alphabetically sorted keys — which satisfies JCS canonicalization.
+    let mut proof_config = proof.clone();
+    if let Some(obj) = proof_config.as_object_mut() {
+        obj.remove("proofValue");
+    }
+    let mut unsigned_vp = vp.clone();
+    if let Some(obj) = unsigned_vp.as_object_mut() {
+        obj.remove("proof");
+    }
+
+    let canonical_proof_config = serde_json::to_string(&jcs_sort(&proof_config)).map_err(|_| Error::ParsingError)?;
+    let canonical_document = serde_json::to_string(&jcs_sort(&unsigned_vp)).map_err(|_| Error::ParsingError)?;
+
+    println!("[ldp_vc_device_auth] canonical_proof_config: {canonical_proof_config}");
+    println!("[ldp_vc_device_auth] canonical_document: {canonical_document}");
+
+    let hash_proof_config = Sha256::digest(canonical_proof_config.as_bytes());
+    let hash_document = Sha256::digest(canonical_document.as_bytes());
+
+    println!("[ldp_vc_device_auth] SHA-256(proofConfig): {}", hex::encode(&hash_proof_config));
+    println!("[ldp_vc_device_auth] SHA-256(document):    {}", hex::encode(&hash_document));
+
+    let mut verify_data = Vec::with_capacity(64);
+    verify_data.extend_from_slice(&hash_proof_config);
+    verify_data.extend_from_slice(&hash_document);
+
+    println!("[ldp_vc_device_auth] verify_data (hex): {}", hex::encode(&verify_data));
+
+    // Step 7: Decode the proofValue (multibase base58btc, 'z' prefix).
+    let proof_value = proof.get("proofValue").and_then(|v| v.as_str()).ok_or(Error::ParsingError)?;
+    if !proof_value.starts_with('z') {
+        return Err(Error::MdocAuth("proofValue must use multibase base58btc (z prefix)".to_string()));
+    }
+    let sig_bytes = bs58::decode(&proof_value[1..]).into_vec().map_err(|_| Error::ParsingError)?;
+
+    println!("[ldp_vc_device_auth] sig_bytes len: {}, hex: {}", sig_bytes.len(), hex::encode(&sig_bytes));
+
+    // Step 8: Verify the P-256 ECDSA signature.
+    // ecdsa-jcs-2019 uses IEEE P1363 format (64-byte R||S); fall back to DER.
+    use p256::ecdsa::signature::Verifier;
+    let signature = if sig_bytes.len() == 64 {
+        println!("[ldp_vc_device_auth] parsing signature as IEEE P1363 (R||S)");
+        p256::ecdsa::Signature::try_from(sig_bytes.as_slice()).map_err(|_| Error::ParsingError)?
+    } else {
+        println!("[ldp_vc_device_auth] parsing signature as DER ({} bytes)", sig_bytes.len());
+        p256::ecdsa::Signature::from_der(&sig_bytes).map_err(|_| Error::ParsingError)?
+    };
+
+    verifying_key.verify(&verify_data, &signature)
+        .map_err(|_| Error::MdocAuth("VP holder proof signature verification failed".to_string()))
 }
 
 pub fn check_expiry(document: &MdocDocument) -> Result<(), Error> {

@@ -574,8 +574,8 @@ impl SessionManager {
 fn format_matches_document(format: &str, document: &Document) -> bool {
     match (format, document) {
         ("mdoc", Document::MsoMdoc(_)) => true,
-        ("w3cjwt", Document::W3cVc(_)) => true,
-        ("sd-jwt", Document::W3cVc(_)) => true,
+        ("w3cjwt", Document::W3cVc(d)) => !d.jwt.contains('~'),
+        ("sd-jwt", Document::W3cVc(d)) => d.jwt.contains('~'),
         ("ldp_vc", Document::LdpVc(_)) => true,
         _ => false,
     }

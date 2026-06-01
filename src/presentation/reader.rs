@@ -394,18 +394,38 @@ impl SessionManager {
     }
 
     fn decrypt_response(&mut self, response: &[u8]) -> Result<DeviceResponse, Error> {
-        let session_data: SessionData = cbor::from_slice(response)?;
+        println!("[decrypt_response] input bytes: {}", response.len());
+        let session_data: SessionData = cbor::from_slice(response).map_err(|e| {
+            println!("[decrypt_response] failed to parse SessionData: {e:?}");
+            Error::CborDecodingError
+        })?;
+        println!("[decrypt_response] SessionData parsed, data present: {}", session_data.data.is_some());
         let encrypted_response = match session_data.data {
             None => return Err(Error::HolderError),
             Some(r) => r,
         };
+        println!("[decrypt_response] encrypted payload bytes: {}", encrypted_response.as_ref().len());
         let decrypted_response = session::decrypt_device_data(
             &self.sk_device.into(),
             encrypted_response.as_ref(),
             &mut self.device_message_counter,
         )
-        .map_err(|_e| Error::DecryptionError)?;
-        let device_response: DeviceResponse = cbor::from_slice(&decrypted_response)?;
+        .map_err(|_e| {
+            println!("[decrypt_response] decryption failed: {_e:?}");
+            Error::DecryptionError
+        })?;
+        println!("[decrypt_response] decrypted {} bytes", decrypted_response.len());
+        let device_response: DeviceResponse = cbor::from_slice(&decrypted_response).map_err(|e| {
+            println!("[decrypt_response] failed to parse DeviceResponse: {e:?}");
+            println!("[decrypt_response] raw decrypted hex: {}", hex::encode(&decrypted_response));
+            Error::CborDecodingError
+        })?;
+        println!(
+            "[decrypt_response] DeviceResponse parsed: version={:?}, documents={}, status={:?}",
+            device_response.version,
+            device_response.documents.as_ref().map_or(0, |d| d.len()),
+            device_response.status,
+        );
         Ok(device_response)
     }
 
@@ -415,6 +435,7 @@ impl SessionManager {
         let device_response = match self.decrypt_response(response) {
             Ok(device_response) => device_response,
             Err(e) => {
+                println!("[handle_response] decrypt_response failed: {e:?}");
                 validated_responses.errors.insert(
                     "decryption_errors".to_string(),
                     json!(vec![format!("{e:?}")]),
@@ -426,6 +447,7 @@ impl SessionManager {
         let documents = match device_response.documents.as_ref() {
             Some(docs) => docs,
             None => {
+                println!("[handle_response] DeviceResponse contained no documents");
                 validated_responses.errors.insert(
                     "parsing_errors".to_string(),
                     json!(vec![format!("{:?}", Error::DeviceTransmissionError)]),
@@ -434,7 +456,17 @@ impl SessionManager {
             }
         };
 
+        println!("[handle_response] processing {} document(s), requested format={:?}", documents.len(), self.format);
         for document in documents.iter() {
+            println!(
+                "[handle_response] document variant={}, doc_type={}",
+                match document {
+                    Document::MsoMdoc(_) => "MsoMdoc",
+                    Document::W3cVc(_) => "W3cVc",
+                    Document::LdpVc(_) => "LdpVc",
+                },
+                document.doc_type(),
+            );
             if !format_matches_document(&self.format, document) {
                 println!(
                     "[handle_response] format mismatch: requested={:?}, received={}",

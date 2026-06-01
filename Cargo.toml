@@ -40,6 +40,7 @@ async-signature = "0.3.0"
 #tracing = "0.1"
 base64 = "0.13"
 base64-url = "3.0.0"
+bs58 = "0.5"
 pem-rfc7468 = "0.7.0"
 x509-cert = { version = "0.2.4", features = ["pem", "builder"] }
 ssi-jwk = "0.2.1"

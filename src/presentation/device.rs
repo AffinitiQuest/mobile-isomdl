@@ -807,7 +807,8 @@ pub trait DeviceSession {
                 }
             };
 
-            let mut issuer_namespaces: BTreeMap<String, NonEmptyVec<IssuerSignedItemBytes>> =
+            // COMPILE FIX: IssuerNamespaces now uses Vec instead of NonEmptyVec.
+            let mut issuer_namespaces: BTreeMap<String, Vec<IssuerSignedItemBytes>> =
                 Default::default();
             let mut errors: BTreeMap<String, NonEmptyMap<String, DocumentErrorCode>> =
                 Default::default();
@@ -819,7 +820,7 @@ pub trait DeviceSession {
                             if let Some(returned_items) = issuer_namespaces.get_mut(&namespace) {
                                 returned_items.push(item.clone());
                             } else {
-                                let returned_items = NonEmptyVec::new(item.clone());
+                                let returned_items = vec![item.clone()]; // COMPILE FIX: Vec instead of NonEmptyVec
                                 issuer_namespaces.insert(namespace.clone(), returned_items);
                             }
                         } else if let Some(returned_errors) = errors.get_mut(&namespace) {
@@ -972,15 +973,15 @@ impl DeviceSession for SessionManager {
 
 impl From<Mdoc> for Document {
     fn from(mdoc: Mdoc) -> Document {
+        // COMPILE FIX: parameter changed from NonEmptyVec to Vec to match IssuerNamespaces type change.
+        // Mdoc issuance still validates non-empty at creation time, so unwrap remains safe in practice.
         fn extract(
-            v: NonEmptyVec<IssuerSignedItemBytes>,
+            v: Vec<IssuerSignedItemBytes>,
         ) -> NonEmptyMap<ElementIdentifier, IssuerSignedItemBytes> {
-            v.into_inner()
-                .into_iter()
+            v.into_iter()
                 .map(|i| (i.as_ref().element_identifier.clone(), i))
                 .collect::<BTreeMap<_, _>>()
                 .try_into()
-                // Can unwrap as there is always at least one element in a NonEmptyVec.
                 .unwrap()
         }
 
@@ -990,13 +991,15 @@ impl From<Mdoc> for Document {
             issuer_auth,
             ..
         } = mdoc;
+        // COMPILE FIX: filter out any empty-Vec namespaces before extract() to preserve unwrap safety.
         let namespaces = namespaces
             .into_inner()
             .into_iter()
+            .filter(|(_, v)| !v.is_empty())
             .map(|(ns, v)| (ns, extract(v)))
             .collect::<BTreeMap<_, _>>()
             .try_into()
-            // Can unwrap as there is always at least one element in a NonEmptyMap.
+            // Can unwrap: Mdoc issuance guarantees at least one namespace with items.
             .unwrap();
 
         Document {

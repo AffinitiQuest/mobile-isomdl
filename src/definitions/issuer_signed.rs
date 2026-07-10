@@ -12,7 +12,7 @@
 
 use crate::cose::MaybeTagged;
 use crate::definitions::{
-    helpers::{ByteStr, NonEmptyMap, NonEmptyVec, Tag24},
+    helpers::{ByteStr, NonEmptyMap, Tag24},
     DigestId,
 };
 use coset::CoseSign1;
@@ -31,7 +31,9 @@ pub struct IssuerSigned {
     pub issuer_auth: MaybeTagged<CoseSign1>,
 }
 
-pub type IssuerNamespaces = NonEmptyMap<String, NonEmptyVec<IssuerSignedItemBytes>>;
+// Changed Vec inner type from NonEmptyVec to Vec: wallets may send namespace entries with empty
+// arrays (e.g. for namespaces requested but with nothing to disclose). NonEmptyVec rejected these.
+pub type IssuerNamespaces = NonEmptyMap<String, Vec<IssuerSignedItemBytes>>;
 pub type IssuerSignedItemBytes = Tag24<IssuerSignedItem>;
 
 /// Represents an item signed by the issuer.

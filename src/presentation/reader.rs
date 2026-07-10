@@ -394,33 +394,33 @@ impl SessionManager {
     }
 
     fn decrypt_response(&mut self, response: &[u8]) -> Result<DeviceResponse, Error> {
-        println!("[decrypt_response] input bytes: {}", response.len());
+        log::info!("[decrypt_response] input bytes: {}", response.len());
         let session_data: SessionData = cbor::from_slice(response).map_err(|e| {
-            println!("[decrypt_response] failed to parse SessionData: {e:?}");
+            log::info!("[decrypt_response] failed to parse SessionData: {e:?}");
             Error::CborDecodingError
         })?;
-        println!("[decrypt_response] SessionData parsed, data present: {}", session_data.data.is_some());
+        log::info!("[decrypt_response] SessionData parsed, data present: {}", session_data.data.is_some());
         let encrypted_response = match session_data.data {
             None => return Err(Error::HolderError),
             Some(r) => r,
         };
-        println!("[decrypt_response] encrypted payload bytes: {}", encrypted_response.as_ref().len());
+        log::info!("[decrypt_response] encrypted payload bytes: {}", encrypted_response.as_ref().len());
         let decrypted_response = session::decrypt_device_data(
             &self.sk_device.into(),
             encrypted_response.as_ref(),
             &mut self.device_message_counter,
         )
         .map_err(|_e| {
-            println!("[decrypt_response] decryption failed: {_e:?}");
+            log::info!("[decrypt_response] decryption failed: {_e:?}");
             Error::DecryptionError
         })?;
-        println!("[decrypt_response] decrypted {} bytes", decrypted_response.len());
+        log::info!("[decrypt_response] decrypted {} bytes", decrypted_response.len());
         let device_response: DeviceResponse = cbor::from_slice(&decrypted_response).map_err(|e| {
-            println!("[decrypt_response] failed to parse DeviceResponse: {e:?}");
-            println!("[decrypt_response] raw decrypted hex: {}", hex::encode(&decrypted_response));
+            log::info!("[decrypt_response] failed to parse DeviceResponse: {e:?}");
+            log::info!("[decrypt_response] raw decrypted hex: {}", hex::encode(&decrypted_response));
             Error::CborDecodingError
         })?;
-        println!(
+        log::info!(
             "[decrypt_response] DeviceResponse parsed: version={:?}, documents={}, status={:?}",
             device_response.version,
             device_response.documents.as_ref().map_or(0, |d| d.len()),
@@ -435,7 +435,7 @@ impl SessionManager {
         let device_response = match self.decrypt_response(response) {
             Ok(device_response) => device_response,
             Err(e) => {
-                println!("[handle_response] decrypt_response failed: {e:?}");
+                log::error!("[handle_response] decrypt_response failed: {e:?}");
                 validated_responses.errors.insert(
                     "decryption_errors".to_string(),
                     json!(vec![format!("{e:?}")]),
@@ -447,7 +447,7 @@ impl SessionManager {
         let documents = match device_response.documents.as_ref() {
             Some(docs) => docs,
             None => {
-                println!("[handle_response] DeviceResponse contained no documents");
+                log::warn!("[handle_response] DeviceResponse contained no documents");
                 validated_responses.errors.insert(
                     "parsing_errors".to_string(),
                     json!(vec![format!("{:?}", Error::DeviceTransmissionError)]),
@@ -456,9 +456,9 @@ impl SessionManager {
             }
         };
 
-        println!("[handle_response] processing {} document(s), requested format={:?}", documents.len(), self.format);
+        log::info!("[handle_response] processing {} document(s), requested format={:?} doc_type={:?}", documents.len(), self.format, self.doc_type);
         for document in documents.iter() {
-            println!(
+            log::info!(
                 "[handle_response] document variant={}, doc_type={}",
                 match document {
                     Document::MsoMdoc(_) => "MsoMdoc",
@@ -468,7 +468,7 @@ impl SessionManager {
                 document.doc_type(),
             );
             if !format_matches_document(&self.format, document) {
-                println!(
+                log::warn!(
                     "[handle_response] format mismatch: requested={:?}, received={}",
                     self.format,
                     match document {
@@ -498,8 +498,8 @@ impl SessionManager {
                         }
                     }
                 }
-                Document::MsoMdoc(_) => {
-                    // doc_type doesn't match — skip
+                Document::MsoMdoc(mdoc) => {
+                    log::warn!("[handle_response] mdoc doc_type mismatch: received={:?}, requested={:?}", mdoc.doc_type, self.doc_type);
                 }
                 Document::W3cVc(w3c) => {
                     let mut validated_response = ResponseAuthenticationOutcome::default();
@@ -705,8 +705,7 @@ fn parse_namespaces_for_doc(
         let mut namespace_fields = BTreeMap::<String, serde_json::Value>::new();
         if let Some(namespace) = namespaces.remove(&namespace_name) {
             namespace
-                .into_inner()
-                .into_iter()
+                .into_iter() // COMPILE FIX: was .into_inner().into_iter() when namespace was NonEmptyVec; now plain Vec
                 .map(|item| item.into_inner())
                 .for_each(|item| {
                     let value = parse_response(item.element_value.clone());

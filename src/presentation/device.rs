@@ -749,6 +749,7 @@ impl PreparedDocument {
             issuer_signed,
             device_signed,
             errors,
+            signed_issuer_metadata: None,
         })
     }
 }

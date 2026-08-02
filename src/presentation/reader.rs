@@ -502,7 +502,10 @@ impl SessionManager {
                     log::warn!("[handle_response] mdoc doc_type mismatch: received={:?}, requested={:?}", mdoc.doc_type, self.doc_type);
                 }
                 Document::W3cVc(w3c) => {
-                    let mut validated_response = ResponseAuthenticationOutcome::default();
+                    let mut validated_response = ResponseAuthenticationOutcome {
+                        signed_issuer_metadata: w3c.signed_issuer_metadata.clone(),
+                        ..Default::default()
+                    };
                     let mut response_fields = BTreeMap::new();
                     response_fields.insert("doc_type".to_string(), w3c.doc_type.clone());
                     response_fields.insert("jwt".to_string(), w3c.jwt.clone());
@@ -523,7 +526,10 @@ impl SessionManager {
                     validated_responses.responses.push(validated_response);
                 }
                 Document::LdpVc(ldp_vc_doc) => {
-                    let mut validated_response = ResponseAuthenticationOutcome::default();
+                    let mut validated_response = ResponseAuthenticationOutcome {
+                        signed_issuer_metadata: ldp_vc_doc.signed_issuer_metadata.clone(),
+                        ..Default::default()
+                    };
                     let mut response_fields = BTreeMap::new();
                     response_fields.insert("doc_type".to_string(), ldp_vc_doc.doc_type.clone());
                     response_fields.insert("ldp_vc".to_string(), ldp_vc_doc.ldp_vc.clone());
@@ -555,8 +561,11 @@ impl SessionManager {
         document: &MdocDocument,
         namespaces: BTreeMap<String, serde_json::Value>,
     ) -> ResponseAuthenticationOutcome {
+        log::info!("[validate_mdoc_response] signed_issuer_metadata present: {}", document.signed_issuer_metadata.is_some());
+
         let mut validated_response = ResponseAuthenticationOutcome {
             response: namespaces,
+            signed_issuer_metadata: document.signed_issuer_metadata.clone(),
             ..Default::default()
         };
 

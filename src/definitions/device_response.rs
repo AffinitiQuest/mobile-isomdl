@@ -102,6 +102,11 @@ pub struct MdocDocument {
     /// Errors associated with the document, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub errors: Option<Errors>,
+
+    /// Optional signed issuer metadata JWS — present if the wallet included it.
+    /// Contains the full OID4VCI CredentialIssuerMetadata payload as a compact JWS string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_issuer_metadata: Option<String>,
 }
 
 /// A W3C VC / SD-JWT credential.
@@ -123,6 +128,10 @@ pub struct W3cVcDocument {
     /// Errors associated with the document, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub errors: Option<Errors>,
+
+    /// Optional signed issuer metadata JWS — present if the wallet included it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_issuer_metadata: Option<String>,
 }
 
 /// An LDP-VC credential presented over BLE.
@@ -138,6 +147,10 @@ pub struct LdpVcDocument {
     /// Errors associated with the document, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub errors: Option<Errors>,
+
+    /// Optional signed issuer metadata JWS — present if the wallet included it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_issuer_metadata: Option<String>,
 }
 
 /// Errors mapped by namespace and element identifier.

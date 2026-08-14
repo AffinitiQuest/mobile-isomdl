@@ -415,6 +415,7 @@ impl SessionManager {
             Error::DecryptionError
         })?;
         log::info!("[decrypt_response] decrypted {} bytes", decrypted_response.len());
+        let decrypted_response = decompress_metadata_images(decrypted_response)?;
         let device_response: DeviceResponse = cbor::from_slice(&decrypted_response).map_err(|e| {
             log::info!("[decrypt_response] failed to parse DeviceResponse: {e:?}");
             log::info!("[decrypt_response] raw decrypted hex: {}", hex::encode(&decrypted_response));
@@ -735,6 +736,123 @@ fn parse_namespaces_for_doc(
     }
 
     Ok(parsed_response)
+}
+
+/// Expand `imageRefs` injected by the wallet's `compressMetadataImages` step.
+///
+/// The wallet replaces duplicate logo/background data URIs in each document's
+/// `signedIssuerMetadata` JWT payload with `__ref:N__` tokens, then appends an
+/// `imageRefs` map to the top-level CBOR.  Here we reverse that: restore the
+/// tokens and remove the `imageRefs` key before the typed `DeviceResponse` parse.
+///
+/// Returns the original bytes unchanged if `imageRefs` is absent (pre-compression
+/// wallets).  Returns `CborDecodingError` only if the bytes are not valid CBOR at
+/// all, which would cause the subsequent typed parse to fail anyway.
+fn decompress_metadata_images(bytes: Vec<u8>) -> Result<Vec<u8>, Error> {
+    let value: ciborium::Value = cbor::from_slice(&bytes).map_err(|_| Error::CborDecodingError)?;
+
+    let mut map = match value {
+        ciborium::Value::Map(m) => m,
+        _ => return Ok(bytes),
+    };
+
+    let image_refs_idx = map.iter().position(|(k, _)| {
+        matches!(k, ciborium::Value::Text(s) if s == "imageRefs")
+    });
+    let image_refs_idx = match image_refs_idx {
+        None => return Ok(bytes),
+        Some(i) => i,
+    };
+
+    let (_, image_refs_val) = map.remove(image_refs_idx);
+
+    let ref_pairs: Vec<(String, String)> = match image_refs_val {
+        ciborium::Value::Map(m) => m
+            .into_iter()
+            .filter_map(|(k, v)| {
+                let key = match k {
+                    ciborium::Value::Text(s) => s,
+                    _ => return None,
+                };
+                let arr = match v {
+                    ciborium::Value::Array(a) if a.len() == 2 => a,
+                    _ => return None,
+                };
+                let mime = match &arr[0] {
+                    ciborium::Value::Text(s) => s.clone(),
+                    _ => return None,
+                };
+                let data = match &arr[1] {
+                    ciborium::Value::Bytes(b) => b.clone(),
+                    ciborium::Value::Tag(_, inner) => match inner.as_ref() {
+                        ciborium::Value::Bytes(b) => b.clone(),
+                        _ => return None,
+                    },
+                    _ => return None,
+                };
+                let uri = format!("data:{};base64,{}", mime, base64::encode(&data));
+                Some((format!("__ref:{}__", key), uri))
+            })
+            .collect(),
+        _ => return Ok(bytes),
+    };
+
+    if ref_pairs.is_empty() {
+        return Ok(bytes);
+    }
+
+    for (key, val) in map.iter_mut() {
+        if matches!(key, ciborium::Value::Text(s) if s == "documents") {
+            if let ciborium::Value::Array(docs) = val {
+                for doc in docs.iter_mut() {
+                    restore_signed_issuer_metadata(doc, &ref_pairs);
+                }
+            }
+            break;
+        }
+    }
+
+    let restored = cbor::to_vec(&ciborium::Value::Map(map)).map_err(|_| Error::CborDecodingError)?;
+    log::info!(
+        "[decompress_metadata_images] restored {} image ref(s), {} -> {} bytes",
+        ref_pairs.len(), bytes.len(), restored.len()
+    );
+    Ok(restored)
+}
+
+fn restore_signed_issuer_metadata(doc: &mut ciborium::Value, ref_pairs: &[(String, String)]) {
+    if let ciborium::Value::Map(doc_map) = doc {
+        for (key, val) in doc_map.iter_mut() {
+            if matches!(key, ciborium::Value::Text(s) if s == "signedIssuerMetadata") {
+                if let ciborium::Value::Text(jwt_str) = val {
+                    let restored = restore_refs_in_jwt(jwt_str.as_str(), ref_pairs);
+                    *jwt_str = restored;
+                }
+                break;
+            }
+        }
+    }
+}
+
+fn restore_refs_in_jwt(jwt: &str, ref_pairs: &[(String, String)]) -> String {
+    let parts: Vec<&str> = jwt.splitn(3, '.').collect();
+    if parts.len() != 3 {
+        return jwt.to_string();
+    }
+    let payload_bytes = match base64_url::decode(parts[1]) {
+        Ok(b) => b,
+        Err(_) => return jwt.to_string(),
+    };
+    let payload_text = match String::from_utf8(payload_bytes) {
+        Ok(s) => s,
+        Err(_) => return jwt.to_string(),
+    };
+    let mut restored = payload_text;
+    for (ref_key, image_uri) in ref_pairs {
+        restored = restored.replace(ref_key.as_str(), image_uri.as_str());
+    }
+    let new_payload = base64_url::encode(restored.as_bytes());
+    format!("{}.{}.{}", parts[0], new_payload, parts[2])
 }
 
 #[cfg(test)]

@@ -31,7 +31,7 @@ use p256::ecdsa::{Signature, SigningKey};
 use p256::{SecretKey};
 
 use super::authentication::{
-    mdoc::{device_authentication, w3c_device_authentication, issuer_authentication},
+    mdoc::{device_authentication, ldp_vc_device_authentication, w3c_device_authentication, issuer_authentication},
     AuthenticationStatus, ResponseAuthenticationOutcome,
 };
 
@@ -47,7 +47,7 @@ use crate::{
         device_engagement::DeviceRetrievalMethod,
         device_key::cose_key::Error as CoseError,
         device_request::{self, DeviceRequest, DocRequest, ItemsRequest},
-        device_response::{Document},
+        device_response::{Document, MdocDocument},
         helpers::{non_empty_vec, NonEmptyVec, Tag24},
         session::{
             self, create_p256_ephemeral_keys, derive_session_key, get_shared_secret, Handover,
@@ -73,6 +73,8 @@ pub struct SessionManager {
     sk_reader: [u8; 32],
     reader_message_counter: u32,
     trust_anchor_registry: TrustAnchorRegistry,
+    doc_type: String,
+    format: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -135,7 +137,9 @@ pub enum Error {
     #[error("Unable to parse issuer public key")]
     IssuerPublicKey(anyhow::Error),
     #[error("Credential is expired")]
-    CredentialExpired
+    CredentialExpired,
+    #[error("Returned credential format does not match requested format")]
+    UnexpectedFormat,
 }
 
 impl From<CborError> for Error {
@@ -250,6 +254,8 @@ impl SessionManager {
             sk_reader,
             reader_message_counter: 0,
             trust_anchor_registry,
+            doc_type: doc_type.clone(),
+            format: format.clone(),
         };
 
         let request = session_manager
@@ -388,18 +394,39 @@ impl SessionManager {
     }
 
     fn decrypt_response(&mut self, response: &[u8]) -> Result<DeviceResponse, Error> {
-        let session_data: SessionData = cbor::from_slice(response)?;
+        log::info!("[decrypt_response] input bytes: {}", response.len());
+        let session_data: SessionData = cbor::from_slice(response).map_err(|e| {
+            log::info!("[decrypt_response] failed to parse SessionData: {e:?}");
+            Error::CborDecodingError
+        })?;
+        log::info!("[decrypt_response] SessionData parsed, data present: {}", session_data.data.is_some());
         let encrypted_response = match session_data.data {
             None => return Err(Error::HolderError),
             Some(r) => r,
         };
+        log::info!("[decrypt_response] encrypted payload bytes: {}", encrypted_response.as_ref().len());
         let decrypted_response = session::decrypt_device_data(
             &self.sk_device.into(),
             encrypted_response.as_ref(),
             &mut self.device_message_counter,
         )
-        .map_err(|_e| Error::DecryptionError)?;
-        let device_response: DeviceResponse = cbor::from_slice(&decrypted_response)?;
+        .map_err(|_e| {
+            log::info!("[decrypt_response] decryption failed: {_e:?}");
+            Error::DecryptionError
+        })?;
+        log::info!("[decrypt_response] decrypted {} bytes", decrypted_response.len());
+        let decrypted_response = decompress_metadata_images(decrypted_response)?;
+        let device_response: DeviceResponse = cbor::from_slice(&decrypted_response).map_err(|e| {
+            log::info!("[decrypt_response] failed to parse DeviceResponse: {e:?}");
+            log::info!("[decrypt_response] raw decrypted hex: {}", hex::encode(&decrypted_response));
+            Error::CborDecodingError
+        })?;
+        log::info!(
+            "[decrypt_response] DeviceResponse parsed: version={:?}, documents={}, status={:?}",
+            device_response.version,
+            device_response.documents.as_ref().map_or(0, |d| d.len()),
+            device_response.status,
+        );
         Ok(device_response)
     }
 
@@ -409,6 +436,7 @@ impl SessionManager {
         let device_response = match self.decrypt_response(response) {
             Ok(device_response) => device_response,
             Err(e) => {
+                log::error!("[handle_response] decrypt_response failed: {e:?}");
                 validated_responses.errors.insert(
                     "decryption_errors".to_string(),
                     json!(vec![format!("{e:?}")]),
@@ -417,97 +445,136 @@ impl SessionManager {
             }
         };
 
-        // Parse all MDOC docs with int.icao.epl.1 doc_type.
-        let document_responses = match parse_documents(&device_response) {
-            Ok(document_res) => {
-                document_res
-            }
-            Err(e) => {
+        let documents = match device_response.documents.as_ref() {
+            Some(docs) => docs,
+            None => {
+                log::warn!("[handle_response] DeviceResponse contained no documents");
                 validated_responses.errors.insert(
                     "parsing_errors".to_string(),
-                    json!(vec![format!("{e:?}")]),
+                    json!(vec![format!("{:?}", Error::DeviceTransmissionError)]),
                 );
-                
-                // If there exists some w3c docs, try to validate them.
-                if let Some(_w3c_docs) = device_response.w3c_documents {
-                    let mut w3c_document = BTreeMap::new();
-                    if let Some(_first_document) = _w3c_docs.first() {
-                        let mut validated_response = ResponseAuthenticationOutcome::default();
-
-                        w3c_document.insert("doc_type".to_string(), _first_document.doc_type.to_string());
-                        w3c_document.insert("jwt".to_string(), _first_document.jwt.to_string());
-                        
-                        match w3c_device_authentication(_first_document, self.session_transcript.clone()) {
-                            Ok(()) => {
-                                validated_responses.errors.clear();
-                                validated_response.device_authentication = AuthenticationStatus::Valid
-                            }
-                            Err(e) => {
-                                validated_response.device_authentication = AuthenticationStatus::Invalid;
-                                validated_response.errors.insert(
-                                    "device_authentication_errors".to_string(),
-                                    json!(vec![format!("{e:?}")]),
-                                );
-                            }
-                        }
-                        let v = json!(&w3c_document);
-                        validated_response
-                            .response
-                            .insert("w3c_documents".to_string(), v);
-                        validated_responses.responses.push(validated_response);
-                        
-                        return validated_responses
-                    } else {
-                        return validated_responses
-                    }
-                } else {
-                    return validated_responses
-                }
+                return validated_responses;
             }
         };
 
-        println!("Number of parsed documents: {:#?}", document_responses.len());
+        log::info!("[handle_response] processing {} document(s), requested format={:?} doc_type={:?}", documents.len(), self.format, self.doc_type);
+        for document in documents.iter() {
+            log::info!(
+                "[handle_response] document variant={}, doc_type={}",
+                match document {
+                    Document::MsoMdoc(_) => "MsoMdoc",
+                    Document::W3cVc(_) => "W3cVc",
+                    Document::LdpVc(_) => "LdpVc",
+                },
+                document.doc_type(),
+            );
+            if !format_matches_document(&self.format, document) {
+                log::warn!(
+                    "[handle_response] format mismatch: requested={:?}, received={}",
+                    self.format,
+                    match document {
+                        Document::MsoMdoc(_) => "MsoMdoc",
+                        Document::W3cVc(_) => "W3cVc",
+                        Document::LdpVc(_) => "LdpVc",
+                    }
+                );
+                validated_responses.errors.insert(
+                    "format_errors".to_string(),
+                    json!(vec![format!("{:?}", Error::UnexpectedFormat)]),
+                );
+                continue;
+            }
+            match document {
+                Document::MsoMdoc(mdoc) if mdoc.doc_type == self.doc_type => {
+                    match parse_mdoc_document(mdoc) {
+                        Ok((x5chain, namespaces)) => {
+                            let validated = self.validate_mdoc_response(x5chain, mdoc, namespaces);
+                            validated_responses.responses.push(validated);
+                        }
+                        Err(e) => {
+                            validated_responses.errors.insert(
+                                "parsing_errors".to_string(),
+                                json!(vec![format!("{e:?}")]),
+                            );
+                        }
+                    }
+                }
+                Document::MsoMdoc(mdoc) => {
+                    log::warn!("[handle_response] mdoc doc_type mismatch: received={:?}, requested={:?}", mdoc.doc_type, self.doc_type);
+                }
+                Document::W3cVc(w3c) => {
+                    let mut validated_response = ResponseAuthenticationOutcome {
+                        signed_issuer_metadata: w3c.signed_issuer_metadata.clone(),
+                        ..Default::default()
+                    };
+                    let mut response_fields = BTreeMap::new();
+                    response_fields.insert("doc_type".to_string(), w3c.doc_type.clone());
+                    response_fields.insert("jwt".to_string(), w3c.jwt.clone());
 
-        //validate MDOCs.
-        for document in document_responses.iter() {
-            let validated_response = self.validate_response(document.1.clone(), document.0.clone(), document.2.clone());
-            validated_responses.responses.push(validated_response);
+                    match w3c_device_authentication(w3c, self.session_transcript.clone()) {
+                        Ok(()) => {
+                            validated_response.device_authentication = AuthenticationStatus::Valid;
+                        }
+                        Err(e) => {
+                            validated_response.device_authentication = AuthenticationStatus::Invalid;
+                            validated_response.errors.insert(
+                                "device_authentication_errors".to_string(),
+                                json!(vec![format!("{e:?}")]),
+                            );
+                        }
+                    }
+                    validated_response.response.insert("document".to_string(), json!(response_fields));
+                    validated_responses.responses.push(validated_response);
+                }
+                Document::LdpVc(ldp_vc_doc) => {
+                    let mut validated_response = ResponseAuthenticationOutcome {
+                        signed_issuer_metadata: ldp_vc_doc.signed_issuer_metadata.clone(),
+                        ..Default::default()
+                    };
+                    let mut response_fields = BTreeMap::new();
+                    response_fields.insert("doc_type".to_string(), ldp_vc_doc.doc_type.clone());
+                    response_fields.insert("ldp_vc".to_string(), ldp_vc_doc.ldp_vc.clone());
+
+                    match ldp_vc_device_authentication(ldp_vc_doc, self.session_transcript.clone()) {
+                        Ok(()) => {
+                            validated_response.device_authentication = AuthenticationStatus::Valid;
+                        }
+                        Err(e) => {
+                            validated_response.device_authentication = AuthenticationStatus::Invalid;
+                            validated_response.errors.insert(
+                                "device_authentication_errors".to_string(),
+                                json!(vec![format!("{e:?}")]),
+                            );
+                        }
+                    }
+                    validated_response.response.insert("document".to_string(), json!(response_fields));
+                    validated_responses.responses.push(validated_response);
+                }
+            }
         }
 
-        // let validated_doc_responses: Vec<ResponseAuthenticationOutcome> = document_responses
-        //     .iter()
-        //     .map(|document| {
-        //         let validated_response = self.validate_response(document.1.clone(), document.0.clone(), document.2.clone());
-        //         validated_responses.responses.push(validated_response);
-        //         println!("Number of parsed documents: {:#?}", validated_responses.responses.len());
-        //     })
-        //     .collect();
-
-        println!("Number of parsed documents: {:#?}", validated_responses.responses.len());
-        return validated_responses
+        validated_responses
     }
 
-    fn validate_response(
+    fn validate_mdoc_response(
         &mut self,
         x5chain: X5Chain,
-        document: Document,
+        document: &MdocDocument,
         namespaces: BTreeMap<String, serde_json::Value>,
     ) -> ResponseAuthenticationOutcome {
+        log::info!("[validate_mdoc_response] signed_issuer_metadata present: {}", document.signed_issuer_metadata.is_some());
+
         let mut validated_response = ResponseAuthenticationOutcome {
             response: namespaces,
+            signed_issuer_metadata: document.signed_issuer_metadata.clone(),
             ..Default::default()
         };
 
-        match check_expiry(&document) {
-            Ok(_) => {
-                // Do Nothing
-            }
-            Err(e) => {
-                validated_response.errors.insert("expired".to_string(), serde_json::Value::Bool(true));
-            }
+        if let Err(_) = check_expiry(document) {
+            validated_response.errors.insert("expired".to_string(), serde_json::Value::Bool(true));
         }
 
-        match device_authentication(&document, self.session_transcript.clone()) {
+        match device_authentication(document, self.session_transcript.clone()) {
             Ok(_) => {
                 validated_response.device_authentication = AuthenticationStatus::Valid;
             }
@@ -542,28 +609,23 @@ impl SessionManager {
                 .insert("certificate_errors".to_string(), json!(validation_errors));
             validated_response.issuer_authentication = AuthenticationStatus::Invalid
         };
-        println!("Validated Response");
         validated_response
     }
 }
 
-fn parse_documents(
-    device_response: &DeviceResponse
-) -> Result<Vec<(&Document, X5Chain, BTreeMap<String, Value>)>, Error> {
-    let documents: Vec<(&Document, X5Chain, BTreeMap<String, Value>)> = device_response
-        .documents
-        .as_ref()
-        .ok_or(ReaderError::DeviceTransmissionError)?
-        .iter()
-        .filter(|doc| doc.doc_type == "int.icao.epl.1".to_string() )
-        .map(|doc| parse_document(doc).unwrap())
-        .collect();
-    return Ok(documents);
+fn format_matches_document(format: &str, document: &Document) -> bool {
+    match (format, document) {
+        ("mdoc", Document::MsoMdoc(_)) => true,
+        ("w3cjwt", Document::W3cVc(d)) => !d.jwt.contains('~'),
+        ("sd-jwt", Document::W3cVc(d)) => d.jwt.contains('~'),
+        ("ldp_vc", Document::LdpVc(_)) => true,
+        _ => false,
+    }
 }
 
-fn parse_document(
-    document: &Document,
-) -> Result<(&Document, X5Chain, BTreeMap<String, Value>), Error> {
+fn parse_mdoc_document(
+    document: &MdocDocument,
+) -> Result<(X5Chain, BTreeMap<String, Value>), Error> {
     let header = document.issuer_signed.issuer_auth.unprotected.clone();
     let x5chain = header
         .rest
@@ -573,25 +635,8 @@ fn parse_document(
         .map(X5Chain::from_cbor)
         .ok_or(Error::X5ChainMissing)?
         .map_err(Error::X5ChainParsing)?;
-    let parsed_response = parse_namespaces_for_doc(document)?;
-    Ok((document, x5chain, parsed_response))
-}
-
-fn parse(
-    device_response: &DeviceResponse,
-) -> Result<(&Document, X5Chain, BTreeMap<String, Value>), Error> {
-    let document = get_document(device_response)?;
-    let header = document.issuer_signed.issuer_auth.unprotected.clone();
-    let x5chain = header
-        .rest
-        .iter()
-        .find(|(label, _)| label == &Label::Int(X5CHAIN_COSE_HEADER_LABEL))
-        .map(|(_, value)| value.to_owned())
-        .map(X5Chain::from_cbor)
-        .ok_or(Error::X5ChainMissing)?
-        .map_err(Error::X5ChainParsing)?;
-    let parsed_response = parse_namespaces(device_response)?;
-    Ok((document, x5chain, parsed_response))
+    let namespaces = parse_namespaces_for_doc(document)?;
+    Ok((x5chain, namespaces))
 }
 
 fn parse_response(value: ciborium::Value) -> Result<Value, Error> {
@@ -630,16 +675,6 @@ fn parse_response(value: ciborium::Value) -> Result<Value, Error> {
     }
 }
 
-fn get_document(device_response: &DeviceResponse) -> Result<&Document, Error> {
-    device_response
-        .documents
-        .as_ref()
-        .ok_or(ReaderError::DeviceTransmissionError)?
-        .iter()
-        .find(|doc| doc.doc_type == "int.icao.epl.1")
-        .ok_or(ReaderError::DocumentTypeError)
-}
-
 fn _validate_request(namespaces: device_request::Namespaces) -> Result<bool, Error> {
     // TODO: Check country name of certificate matches mdl
 
@@ -663,18 +698,8 @@ fn _validate_request(namespaces: device_request::Namespaces) -> Result<bool, Err
 }
 
 fn parse_namespaces_for_doc(
-    document: &Document
+    document: &MdocDocument,
 ) -> Result<BTreeMap<String, serde_json::Value>, Error> {
-    // let mut core_namespace = BTreeMap::<String, serde_json::Value>::new();
-    // let mut aamva_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut general_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut personnel_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut authority_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut ratings_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut remarks_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut medical_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut additional_namespace = BTreeMap::<String, serde_json::Value>::new();
-
     let mut parsed_response = BTreeMap::<String, serde_json::Value>::new();
     let mut namespaces = document
         .issuer_signed
@@ -684,129 +709,25 @@ fn parse_namespaces_for_doc(
         .clone()
         .into_inner();
 
-    if let Some(general_response) = namespaces.remove("int.icao.epl.general.1") {
-        general_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    general_namespace.insert(item.element_identifier, val);
-                }
-            });
+    let keys: Vec<String> = namespaces.keys().cloned().collect();
+
+    for namespace_name in keys {
+        let mut namespace_fields = BTreeMap::<String, serde_json::Value>::new();
+        if let Some(namespace) = namespaces.remove(&namespace_name) {
+            namespace
+                .into_iter() // COMPILE FIX: was .into_inner().into_iter() when namespace was NonEmptyVec; now plain Vec
+                .map(|item| item.into_inner())
+                .for_each(|item| {
+                    let value = parse_response(item.element_value.clone());
+                    if let Ok(val) = value {
+                        namespace_fields.insert(item.element_identifier, val);
+                    }
+                });            
+        }
 
         parsed_response.insert(
-            "int.icao.epl.general.1".to_string(),
-            serde_json::to_value(general_namespace)?,
-        );
-    }
-
-    if let Some(personnel_response) = namespaces.remove("int.icao.epl.personnel.1") {
-        personnel_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    personnel_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.personnel.1".to_string(),
-            serde_json::to_value(personnel_namespace)?,
-        );
-    }
-
-    if let Some(authority_response) = namespaces.remove("int.icao.epl.authority.1") {
-        authority_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    authority_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.authority.1".to_string(),
-            serde_json::to_value(authority_namespace)?,
-        );
-    }
-
-    if let Some(ratings_response) = namespaces.remove("int.icao.epl.ratings.1") {
-        ratings_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    ratings_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.ratings.1".to_string(),
-            serde_json::to_value(ratings_namespace)?,
-        );
-    }
-
-    if let Some(remarks_response) = namespaces.remove("int.icao.epl.remarks.1") {
-        remarks_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    remarks_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.remarks.1".to_string(),
-            serde_json::to_value(remarks_namespace)?,
-        );
-    }
-
-    if let Some(medical_response) = namespaces.remove("int.icao.epl.medical.1") {
-        medical_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    medical_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.medical.1".to_string(),
-            serde_json::to_value(medical_namespace)?,
-        );
-    }
-
-    if let Some(additional_response) = namespaces.remove("int.icao.epl.additional.1") {
-        additional_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    additional_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.additional.1".to_string(),
-            serde_json::to_value(additional_namespace)?,
+            namespace_name.to_string(),
+            serde_json::to_value(namespace_fields)?,
         );
     }
 
@@ -817,167 +738,121 @@ fn parse_namespaces_for_doc(
     Ok(parsed_response)
 }
 
-// TODO: Support other namespaces.
-fn parse_namespaces(
-    device_response: &DeviceResponse,
-) -> Result<BTreeMap<String, serde_json::Value>, Error> {
-    // let mut core_namespace = BTreeMap::<String, serde_json::Value>::new();
-    // let mut aamva_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut general_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut personnel_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut authority_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut ratings_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut remarks_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut medical_namespace = BTreeMap::<String, serde_json::Value>::new();
-    let mut additional_namespace = BTreeMap::<String, serde_json::Value>::new();
+/// Expand `imageRefs` injected by the wallet's `compressMetadataImages` step.
+///
+/// The wallet replaces duplicate logo/background data URIs in each document's
+/// `signedIssuerMetadata` JWT payload with `__ref:N__` tokens, then appends an
+/// `imageRefs` map to the top-level CBOR.  Here we reverse that: restore the
+/// tokens and remove the `imageRefs` key before the typed `DeviceResponse` parse.
+///
+/// Returns the original bytes unchanged if `imageRefs` is absent (pre-compression
+/// wallets).  Returns `CborDecodingError` only if the bytes are not valid CBOR at
+/// all, which would cause the subsequent typed parse to fail anyway.
+fn decompress_metadata_images(bytes: Vec<u8>) -> Result<Vec<u8>, Error> {
+    let value: ciborium::Value = cbor::from_slice(&bytes).map_err(|_| Error::CborDecodingError)?;
 
-    let mut parsed_response = BTreeMap::<String, serde_json::Value>::new();
-    let mut namespaces = device_response
-        .documents
-        .as_ref()
-        .ok_or(Error::DeviceTransmissionError)?
-        .iter()
-        //.find(|doc| doc.doc_type == "org.iso.18013.5.1.mDL")
-        .find(|doc| doc.doc_type == "int.icao.epl.1")
-        .ok_or(Error::DocumentTypeError)?
-        .issuer_signed
-        .namespaces
-        .as_ref()
-        .ok_or(Error::NoMdlDataTransmission)?
-        .clone()
-        .into_inner();
+    let mut map = match value {
+        ciborium::Value::Map(m) => m,
+        _ => return Ok(bytes),
+    };
 
-    if let Some(general_response) = namespaces.remove("int.icao.epl.general.1") {
-        general_response
-            .into_inner()
+    let image_refs_idx = map.iter().position(|(k, _)| {
+        matches!(k, ciborium::Value::Text(s) if s == "imageRefs")
+    });
+    let image_refs_idx = match image_refs_idx {
+        None => return Ok(bytes),
+        Some(i) => i,
+    };
+
+    let (_, image_refs_val) = map.remove(image_refs_idx);
+
+    let ref_pairs: Vec<(String, String)> = match image_refs_val {
+        ciborium::Value::Map(m) => m
             .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    general_namespace.insert(item.element_identifier, val);
+            .filter_map(|(k, v)| {
+                let key = match k {
+                    ciborium::Value::Text(s) => s,
+                    _ => return None,
+                };
+                let arr = match v {
+                    ciborium::Value::Array(a) if a.len() == 2 => a,
+                    _ => return None,
+                };
+                let mime = match &arr[0] {
+                    ciborium::Value::Text(s) => s.clone(),
+                    _ => return None,
+                };
+                let data = match &arr[1] {
+                    ciborium::Value::Bytes(b) => b.clone(),
+                    ciborium::Value::Tag(_, inner) => match inner.as_ref() {
+                        ciborium::Value::Bytes(b) => b.clone(),
+                        _ => return None,
+                    },
+                    _ => return None,
+                };
+                let uri = format!("data:{};base64,{}", mime, base64::encode(&data));
+                Some((format!("__ref:{}__", key), uri))
+            })
+            .collect(),
+        _ => return Ok(bytes),
+    };
+
+    if ref_pairs.is_empty() {
+        return Ok(bytes);
+    }
+
+    for (key, val) in map.iter_mut() {
+        if matches!(key, ciborium::Value::Text(s) if s == "documents") {
+            if let ciborium::Value::Array(docs) = val {
+                for doc in docs.iter_mut() {
+                    restore_signed_issuer_metadata(doc, &ref_pairs);
                 }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.general.1".to_string(),
-            serde_json::to_value(general_namespace)?,
-        );
+            }
+            break;
+        }
     }
 
-    if let Some(personnel_response) = namespaces.remove("int.icao.epl.personnel.1") {
-        personnel_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    personnel_namespace.insert(item.element_identifier, val);
+    let restored = cbor::to_vec(&ciborium::Value::Map(map)).map_err(|_| Error::CborDecodingError)?;
+    log::info!(
+        "[decompress_metadata_images] restored {} image ref(s), {} -> {} bytes",
+        ref_pairs.len(), bytes.len(), restored.len()
+    );
+    Ok(restored)
+}
+
+fn restore_signed_issuer_metadata(doc: &mut ciborium::Value, ref_pairs: &[(String, String)]) {
+    if let ciborium::Value::Map(doc_map) = doc {
+        for (key, val) in doc_map.iter_mut() {
+            if matches!(key, ciborium::Value::Text(s) if s == "signedIssuerMetadata") {
+                if let ciborium::Value::Text(jwt_str) = val {
+                    let restored = restore_refs_in_jwt(jwt_str.as_str(), ref_pairs);
+                    *jwt_str = restored;
                 }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.personnel.1".to_string(),
-            serde_json::to_value(personnel_namespace)?,
-        );
+                break;
+            }
+        }
     }
+}
 
-    if let Some(authority_response) = namespaces.remove("int.icao.epl.authority.1") {
-        authority_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    authority_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.authority.1".to_string(),
-            serde_json::to_value(authority_namespace)?,
-        );
+fn restore_refs_in_jwt(jwt: &str, ref_pairs: &[(String, String)]) -> String {
+    let parts: Vec<&str> = jwt.splitn(3, '.').collect();
+    if parts.len() != 3 {
+        return jwt.to_string();
     }
-
-    if let Some(ratings_response) = namespaces.remove("int.icao.epl.ratings.1") {
-        ratings_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    ratings_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.ratings.1".to_string(),
-            serde_json::to_value(ratings_namespace)?,
-        );
+    let payload_bytes = match base64_url::decode(parts[1]) {
+        Ok(b) => b,
+        Err(_) => return jwt.to_string(),
+    };
+    let payload_text = match String::from_utf8(payload_bytes) {
+        Ok(s) => s,
+        Err(_) => return jwt.to_string(),
+    };
+    let mut restored = payload_text;
+    for (ref_key, image_uri) in ref_pairs {
+        restored = restored.replace(ref_key.as_str(), image_uri.as_str());
     }
-
-    if let Some(remarks_response) = namespaces.remove("int.icao.epl.remarks.1") {
-        remarks_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    remarks_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.remarks.1".to_string(),
-            serde_json::to_value(remarks_namespace)?,
-        );
-    }
-
-    if let Some(medical_response) = namespaces.remove("int.icao.epl.medical.1") {
-        medical_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    medical_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.medical.1".to_string(),
-            serde_json::to_value(medical_namespace)?,
-        );
-    }
-
-    if let Some(additional_response) = namespaces.remove("int.icao.epl.additional.1") {
-        additional_response
-            .into_inner()
-            .into_iter()
-            .map(|item| item.into_inner())
-            .for_each(|item| {
-                let value = parse_response(item.element_value.clone());
-                if let Ok(val) = value {
-                    additional_namespace.insert(item.element_identifier, val);
-                }
-            });
-
-        parsed_response.insert(
-            "int.icao.epl.additional.1".to_string(),
-            serde_json::to_value(additional_namespace)?,
-        );
-    }
-
-    if(parsed_response.is_empty()) {
-        return Err(Error::IncorrectNamespace);
-    }
-
-    Ok(parsed_response)
+    let new_payload = base64_url::encode(restored.as_bytes());
+    format!("{}.{}.{}", parts[0], new_payload, parts[2])
 }
 
 #[cfg(test)]

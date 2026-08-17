@@ -33,6 +33,10 @@ pub struct ResponseAuthenticationOutcome {
     pub device_authentication: AuthenticationStatus,
     /// Errors that occurred during response processing.
     pub errors: Errors,
+    /// Raw JWS string from the document's signedIssuerMetadata field, if present.
+    pub signed_issuer_metadata: Option<String>,
+    /// Whether the signed issuer metadata JWS signature was verified. None = not attempted.
+    pub issuer_metadata_signature_verified: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]

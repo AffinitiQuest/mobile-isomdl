@@ -40,11 +40,20 @@ async-signature = "0.3.0"
 #tracing = "0.1"
 base64 = "0.13"
 base64-url = "3.0.0"
+bs58 = "0.5"
 pem-rfc7468 = "0.7.0"
 x509-cert = { version = "0.2.4", features = ["pem", "builder"] }
+ssi-claims = { version = "0.2.0", features = ["w3c", "secp256r1"] }
+ssi-dids = "0.2.1"
+ssi-json-ld = "0.3.1"
+ssi-verification-methods = "0.1.3"
 ssi-jwk = "0.2.1"
 ssi-jws = "0.3.1"
 ssi-claims-core = "0.1.3"
+linked-data = "0.1.2"
+json-syntax = "0.12.5"
+ssi-rdf = "0.1.0"
+tokio = { version = "1", features = ["rt"] }
 jsonwebtokens = "1.2.0"
 isomdl-macros = { version = "0.1.0", path = "macros" }
 clap = { version = "4", features = ["derive"] }
@@ -61,6 +70,7 @@ coset = "0.3.8"
 ciborium = "0.2.2"
 digest = "0.10.7"
 tracing = "0.1.41"
+log = "0.4"
 sha1 = "0.10.6"
 
 [dev-dependencies]

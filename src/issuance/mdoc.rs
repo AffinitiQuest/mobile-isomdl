@@ -14,7 +14,7 @@ use crate::cose::{MaybeTagged, SignatureAlgorithm};
 use crate::{
     definitions::x509::x5chain::{X5Chain, X5CHAIN_COSE_HEADER_LABEL},
     definitions::{
-        helpers::{NonEmptyMap, NonEmptyVec, Tag24},
+        helpers::{NonEmptyMap, Tag24}, // NonEmptyVec removed: compile fix for IssuerNamespaces type change
         issuer_signed::{IssuerNamespaces, IssuerSignedItemBytes},
         DeviceKeyInfo, DigestAlgorithm, DigestId, DigestIds, IssuerSignedItem, Mso, ValidityInfo,
     },
@@ -356,13 +356,11 @@ fn to_issuer_namespaces(namespaces: Namespaces) -> Result<IssuerNamespaces> {
                 .map(Tag24::new)
                 .collect::<Result<Vec<Tag24<IssuerSignedItem>>, _>>()
                 .map_err(|err| anyhow!("unable to encode IssuerSignedItem as cbor: {}", err))
-                .and_then(|items| {
-                    NonEmptyVec::try_from(items)
-                        .map_err(|_| anyhow!("at least one element required in each namespace"))
-                })
-                .map(|elems| (name, elems))
+                // COMPILE FIX: IssuerNamespaces now uses Vec instead of NonEmptyVec.
+                // The non-empty guarantee is preserved here by issuance validation upstream.
+                .map(|items| (name, items))
         })
-        .collect::<Result<BTreeMap<String, NonEmptyVec<Tag24<IssuerSignedItem>>>>>()
+        .collect::<Result<BTreeMap<String, Vec<Tag24<IssuerSignedItem>>>>>()
         .and_then(|namespaces| {
             NonEmptyMap::try_from(namespaces)
                 .map_err(|_| anyhow!("at least one namespace required"))

@@ -11,7 +11,7 @@ use elliptic_curve::{
     AffinePoint, CurveArithmetic, FieldBytesSize, PublicKey,
 };
 use sec1::point::ModulusSize;
-use x509_cert::{attr::AttributeValue, name::Name, Certificate};
+use x509_cert::{attr::AttributeValue, Certificate};
 
 /// Get the public key from a certificate for verification.
 pub fn public_key<C>(certificate: &Certificate) -> Result<VerifyingKey<C>, Error>
@@ -35,11 +35,10 @@ pub fn common_name_or_unknown(certificate: &Certificate) -> &str {
 }
 
 fn common_name(certificate: &Certificate) -> Option<&str> {
-    common_name_from(&certificate.tbs_certificate.subject)
-}
-
-fn common_name_from(name: &Name) -> Option<&str> {
-    name.0
+    certificate
+        .tbs_certificate
+        .subject
+        .0
         .iter()
         .flat_map(|rdn| rdn.0.iter())
         .filter_map(|attribute| {

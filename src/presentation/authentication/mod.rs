@@ -41,9 +41,6 @@ pub struct ResponseAuthenticationOutcome {
     /// data, for CRL-based revocation checking downstream. Present regardless of whether
     /// issuer/chain validation succeeded, since revocation is an orthogonal check.
     pub leaf_certificate_serial_number: Option<String>,
-    /// Common name of the issuer (CA) of the leaf certificate above, used to disambiguate
-    /// which CA's CRL applies when a serial number alone would be ambiguous.
-    pub leaf_certificate_issuer_common_name: Option<String>,
     /// CRL distribution point URI from the leaf certificate's own CRLDistributionPoints
     /// extension (OID 2.5.29.31), if present and well-formed. This is the CRL location
     /// baked directly into the certificate, as opposed to a pre-synced/cached URL - used

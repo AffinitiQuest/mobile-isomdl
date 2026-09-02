@@ -571,9 +571,6 @@ impl SessionManager {
             leaf_certificate_serial_number: Some(hex::encode(
                 leaf_cert.tbs_certificate.serial_number.as_bytes(),
             )),
-            leaf_certificate_issuer_common_name: Some(
-                x5chain.end_entity_issuer_common_name().to_string(),
-            ),
             leaf_certificate_crl_distribution_point: leaf_certificate_crl_distribution_point(leaf_cert),
             ..Default::default()
         };

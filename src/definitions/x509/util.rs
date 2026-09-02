@@ -34,11 +34,6 @@ pub fn common_name_or_unknown(certificate: &Certificate) -> &str {
     common_name(certificate).unwrap_or("Unknown")
 }
 
-/// Get the first CommonName of the X.509 certificate's issuer, or return "Unknown".
-pub fn issuer_common_name_or_unknown(certificate: &Certificate) -> &str {
-    common_name_from(&certificate.tbs_certificate.issuer).unwrap_or("Unknown")
-}
-
 fn common_name(certificate: &Certificate) -> Option<&str> {
     common_name_from(&certificate.tbs_certificate.subject)
 }

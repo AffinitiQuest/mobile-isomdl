@@ -15,7 +15,7 @@ use elliptic_curve::{
 use x509_cert::der::Encode;
 use x509_cert::{certificate::Certificate, der::Decode};
 
-use super::util::{common_name_or_unknown, public_key};
+use super::util::{common_name_or_unknown, issuer_common_name_or_unknown, public_key};
 
 /// See: <https://www.iana.org/assignments/cose/cose.xhtml#header-parameters>
 pub const X5CHAIN_COSE_HEADER_LABEL: i64 = 0x21;
@@ -118,6 +118,12 @@ impl X5Chain {
     /// Retrieve the public key of the end-entity certificate.
     pub fn end_entity_common_name(&self) -> &str {
         common_name_or_unknown(self.end_entity_certificate())
+    }
+
+    /// Retrieve the common name of the issuer of the end-entity certificate (i.e. the CA
+    /// that signed it), as distinct from the end-entity's own subject common name above.
+    pub fn end_entity_issuer_common_name(&self) -> &str {
+        issuer_common_name_or_unknown(self.end_entity_certificate())
     }
 }
 

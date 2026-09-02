@@ -37,6 +37,20 @@ pub struct ResponseAuthenticationOutcome {
     pub signed_issuer_metadata: Option<String>,
     /// Whether the signed issuer metadata JWS signature was verified. None = not attempted.
     pub issuer_metadata_signature_verified: Option<bool>,
+    /// Serial number (hex-encoded) of the leaf certificate that signed the issuer-signed
+    /// data, for CRL-based revocation checking downstream. Present regardless of whether
+    /// issuer/chain validation succeeded, since revocation is an orthogonal check.
+    pub leaf_certificate_serial_number: Option<String>,
+    /// Common name of the issuer (CA) of the leaf certificate above, used to disambiguate
+    /// which CA's CRL applies when a serial number alone would be ambiguous.
+    pub leaf_certificate_issuer_common_name: Option<String>,
+    /// CRL distribution point URI from the leaf certificate's own CRLDistributionPoints
+    /// extension (OID 2.5.29.31), if present and well-formed. This is the CRL location
+    /// baked directly into the certificate, as opposed to a pre-synced/cached URL - used
+    /// as a fallback source when no local trust data is available for this CA. `None` if
+    /// the extension is absent or malformed, which is a normal, valid state (the
+    /// extension is optional per RFC 5280), not an error.
+    pub leaf_certificate_crl_distribution_point: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]

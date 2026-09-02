@@ -564,9 +564,17 @@ impl SessionManager {
     ) -> ResponseAuthenticationOutcome {
         log::info!("[validate_mdoc_response] signed_issuer_metadata present: {}", document.signed_issuer_metadata.is_some());
 
+        let leaf_cert = x5chain.end_entity_certificate();
         let mut validated_response = ResponseAuthenticationOutcome {
             response: namespaces,
             signed_issuer_metadata: document.signed_issuer_metadata.clone(),
+            leaf_certificate_serial_number: Some(hex::encode(
+                leaf_cert.tbs_certificate.serial_number.as_bytes(),
+            )),
+            leaf_certificate_issuer_common_name: Some(
+                x5chain.end_entity_issuer_common_name().to_string(),
+            ),
+            leaf_certificate_crl_distribution_point: leaf_certificate_crl_distribution_point(leaf_cert),
             ..Default::default()
         };
 
@@ -611,6 +619,40 @@ impl SessionManager {
         };
         validated_response
     }
+}
+
+/// Extracts the URI from a leaf certificate's own CRLDistributionPoints extension
+/// (OID 2.5.29.31), if present and well-formed. Returns `None` rather than erroring
+/// when the extension is absent - it's optional per RFC 5280, so a missing/malformed
+/// extension is a normal state here, not a validation failure (validity of this
+/// extension when required is checked separately, see
+/// `x509::validation::extensions::CrlDistributionPointsValidator`).
+fn leaf_certificate_crl_distribution_point(leaf_cert: &x509_cert::Certificate) -> Option<String> {
+    use const_oid::AssociatedOid;
+    use der::Decode;
+    use x509_cert::ext::pkix::{
+        name::{DistributionPointName, GeneralName},
+        CrlDistributionPoints,
+    };
+
+    leaf_cert
+        .tbs_certificate
+        .extensions
+        .iter()
+        .flatten()
+        .find(|ext| ext.extn_id == CrlDistributionPoints::OID)
+        .and_then(|ext| CrlDistributionPoints::from_der(ext.extn_value.as_bytes()).ok())
+        .and_then(|crl_dps| {
+            crl_dps.0.into_iter().find_map(|dp| match dp.distribution_point {
+                Some(DistributionPointName::FullName(names)) => {
+                    names.into_iter().find_map(|gn| match gn {
+                        GeneralName::UniformResourceIdentifier(uri) => Some(uri.as_str().to_string()),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+        })
 }
 
 fn format_matches_document(format: &str, document: &Document) -> bool {

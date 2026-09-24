@@ -1,6 +1,7 @@
 pub mod trust_anchor;
 mod util;
 pub mod validation;
+pub mod vical;
 pub mod x5chain;
 
 pub use x5chain::{Builder, X5Chain};

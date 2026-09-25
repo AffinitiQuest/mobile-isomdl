@@ -19,7 +19,7 @@ mod error;
 mod extensions;
 mod names;
 pub(super) mod signature;
-mod validity;
+pub(super) mod validity;
 
 /// Ruleset for X5Chain validation.
 #[derive(Debug, Clone, Copy)]

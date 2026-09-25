@@ -286,18 +286,7 @@ fn extract_next_update(payload: &CborValue) -> Option<String> {
 ///
 /// If the payload carries a `nextUpdate`, it is checked against the current time and an expired
 /// VICAL is rejected with [`VicalError::Expired`].
-///
-/// TEMPORARY TESTING OVERRIDE: when `allow_unverified_signature_for_testing`
-/// is `true`, a VICAL whose embedded chain links to a trust anchor but whose COSE_Sign1 signature
-/// still doesn't actually verify is logged and treated as trusted anyway, instead of returning
-/// [`VicalError::SignatureNotVerified`]. Every real caller must pass `false` here - the one call
-/// site that currently passes `true` is flagged just as loudly at its own definition
-/// (`mobile-sdk-rs`'s `TEMP_VICAL_ALLOW_UNVERIFIED_SIGNATURE_FOR_TESTING`).
-pub fn verify_vical(
-    vical_bytes: &[u8],
-    trust_anchor_chain_pems: &[String],
-    allow_unverified_signature_for_testing: bool,
-) -> Result<VerifiedVical> {
+pub fn verify_vical(vical_bytes: &[u8], trust_anchor_chain_pems: &[String]) -> Result<VerifiedVical> {
     // Count only - no cert/PEM content.
     log::info!(
         "[verify_vical] trust_anchor_chain_pems={}",
@@ -329,21 +318,10 @@ pub fn verify_vical(
 
         let verifying_key = verifying_key_for_signature(&embedded_chain, &trust_anchors)?;
 
-        let verification = cose_sign1
+        cose_sign1
             .verify::<VerifyingKey, Signature>(&verifying_key, None, None)
-            .into_result();
-        match verification {
-            Ok(()) => {}
-            Err(reason) if allow_unverified_signature_for_testing => {
-                log::warn!(
-                    "[verify_vical] TESTING OVERRIDE ACTIVE: signature verification FAILED ({reason}) \
-                     but proceeding anyway because allow_unverified_signature_for_testing=true. \
-                     THIS MUST NOT SHIP - see verify_vical's own doc comment and \
-                     mobile-sdk-rs's TEMP_VICAL_ALLOW_UNVERIFIED_SIGNATURE_FOR_TESTING."
-                );
-            }
-            Err(reason) => return Err(VicalError::SignatureNotVerified(reason)),
-        }
+            .into_result()
+            .map_err(VicalError::SignatureNotVerified)?;
     }
 
     let payload = cose_sign1.inner.payload.as_ref().ok_or(VicalError::NoPayload)?;
@@ -614,7 +592,7 @@ mod tests {
         let vical_bytes = build_signed_vical(&signer_key, &[&signer], &certificate_infos, None);
         let trust_anchor_chain_pems = vec![pem(&root)];
 
-        let verified = verify_vical(&vical_bytes, &trust_anchor_chain_pems, false).expect("VICAL should verify");
+        let verified = verify_vical(&vical_bytes, &trust_anchor_chain_pems).expect("VICAL should verify");
         let pems = verified
             .certificates_as_pem(None)
             .expect("listed certificates should re-encode as PEM");
@@ -633,7 +611,7 @@ mod tests {
         let vical_bytes = build_signed_vical(&signer_key, &[&signer], &certificate_infos, None);
         let trust_anchor_chain_pems = vec![pem(&root)];
 
-        let verified = verify_vical(&vical_bytes, &trust_anchor_chain_pems, false).expect("VICAL should verify");
+        let verified = verify_vical(&vical_bytes, &trust_anchor_chain_pems).expect("VICAL should verify");
         let pems = verified
             .certificates_as_pem(Some("org.iso.18013.5.1.mDL"))
             .expect("matching certificate should re-encode as PEM");
@@ -650,7 +628,7 @@ mod tests {
         let vical_bytes = build_signed_vical(&signer_key, &[&signer], &[(signer.to_der().unwrap(), vec![])], None);
         let trust_anchor_chain_pems = vec![pem(&root)];
 
-        verify_vical(&vical_bytes, &trust_anchor_chain_pems, false).expect("VICAL should verify");
+        verify_vical(&vical_bytes, &trust_anchor_chain_pems).expect("VICAL should verify");
     }
 
     // Proves verifying_key_for_signature's walk actually advances past the first embedded
@@ -667,7 +645,7 @@ mod tests {
         );
         let trust_anchor_chain_pems = vec![pem(&root)];
 
-        verify_vical(&vical_bytes, &trust_anchor_chain_pems, false).expect("VICAL should verify");
+        verify_vical(&vical_bytes, &trust_anchor_chain_pems).expect("VICAL should verify");
     }
 
     #[test]
@@ -677,7 +655,7 @@ mod tests {
         let vical_bytes = build_signed_vical(&wrong_key, &[&signer], &[(signer.to_der().unwrap(), vec![])], None);
         let trust_anchor_chain_pems = vec![pem(&root)];
 
-        let err = verify_vical(&vical_bytes, &trust_anchor_chain_pems, false).unwrap_err();
+        let err = verify_vical(&vical_bytes, &trust_anchor_chain_pems).unwrap_err();
         assert!(matches!(err, VicalError::SignatureNotVerified(_)));
     }
 
@@ -689,7 +667,7 @@ mod tests {
         // signer_a was not issued by root_b - not a valid chain.
         let trust_anchor_chain_pems = vec![pem(&root_b)];
 
-        let err = verify_vical(&vical_bytes, &trust_anchor_chain_pems, false).unwrap_err();
+        let err = verify_vical(&vical_bytes, &trust_anchor_chain_pems).unwrap_err();
         assert!(matches!(err, VicalError::InvalidTrustAnchorChain(_)));
     }
 
@@ -699,7 +677,7 @@ mod tests {
         let vical_bytes = build_signed_vical(&signer_key, &[], &[(signer.to_der().unwrap(), vec![])], None);
         let trust_anchor_chain_pems = vec![pem(&root)];
 
-        let err = verify_vical(&vical_bytes, &trust_anchor_chain_pems, false).unwrap_err();
+        let err = verify_vical(&vical_bytes, &trust_anchor_chain_pems).unwrap_err();
         assert!(matches!(err, VicalError::MissingEmbeddedX5Chain));
     }
 
@@ -711,26 +689,7 @@ mod tests {
         let (_root, signer, signer_key) = root_and_signer();
         let vical_bytes = build_signed_vical(&signer_key, &[&signer], &[(signer.to_der().unwrap(), vec![])], None);
 
-        let verified = verify_vical(&vical_bytes, &[], false).expect("VICAL should be treated as trusted");
-        let pems = verified
-            .certificates_as_pem(None)
-            .expect("listed certificate should re-encode as PEM");
-        assert_eq!(pems, vec![pem(&signer)]);
-    }
-
-    // TEMPORARY TESTING OVERRIDE (see verify_vical's own doc comment) - proves
-    // allow_unverified_signature_for_testing=true actually lets a bad signature through instead
-    // of silently doing nothing. The embedded chain still needs to link to a trust anchor first -
-    // this override only covers the final signature check failing, not the chain-linking step.
-    #[test]
-    fn testing_override_lets_a_bad_signature_through_when_requested() {
-        let (root, signer, _signer_key) = root_and_signer();
-        let (_other_root, _other_signer, wrong_key) = root_and_signer();
-        let vical_bytes = build_signed_vical(&wrong_key, &[&signer], &[(signer.to_der().unwrap(), vec![])], None);
-        let trust_anchor_chain_pems = vec![pem(&root)];
-
-        let verified = verify_vical(&vical_bytes, &trust_anchor_chain_pems, true)
-            .expect("override should let an unverified signature through");
+        let verified = verify_vical(&vical_bytes, &[]).expect("VICAL should be treated as trusted");
         let pems = verified
             .certificates_as_pem(None)
             .expect("listed certificate should re-encode as PEM");
@@ -748,7 +707,7 @@ mod tests {
         );
         let trust_anchor_chain_pems = vec![pem(&root)];
 
-        let err = verify_vical(&vical_bytes, &trust_anchor_chain_pems, false).unwrap_err();
+        let err = verify_vical(&vical_bytes, &trust_anchor_chain_pems).unwrap_err();
         assert!(matches!(err, VicalError::Expired));
     }
 
@@ -763,6 +722,6 @@ mod tests {
         );
         let trust_anchor_chain_pems = vec![pem(&root)];
 
-        verify_vical(&vical_bytes, &trust_anchor_chain_pems, false).expect("VICAL should verify");
+        verify_vical(&vical_bytes, &trust_anchor_chain_pems).expect("VICAL should verify");
     }
 }

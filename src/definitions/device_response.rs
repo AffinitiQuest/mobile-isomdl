@@ -283,7 +283,7 @@ mod test {
         };
         let issuer_signed_item_bytes = IssuerSignedItemBytes::new(issuer_signed_item).unwrap();
         let vec = NonEmptyVec::new(issuer_signed_item_bytes);
-        let issuer_namespaces = IssuerNamespaces::new("a".to_string(), vec);
+        let issuer_namespaces = IssuerNamespaces::new("a".to_string(), vec.into_inner());
         let device_signed_items = DeviceSignedItems::new("a".to_string(), ciborium::Value::Null);
         let mut device_namespaces = DeviceNamespaces::new();
         device_namespaces.insert("a".to_string(), device_signed_items);
@@ -299,6 +299,7 @@ mod test {
                 device_auth: DeviceAuth::DeviceMac(cose_mac0),
             },
             errors: None,
+            signed_issuer_metadata: None,
         });
         let docs = Documents::new(doc);
         let document_error_code = DocumentErrorCode::DataNotReturned;

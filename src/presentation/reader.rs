@@ -31,7 +31,8 @@ use p256::ecdsa::{Signature, SigningKey};
 use p256::{SecretKey};
 
 use super::authentication::{
-    mdoc::{device_authentication, ldp_vc_device_authentication, w3c_device_authentication, issuer_authentication},
+    mdoc::{device_authentication, ldp_vc_device_authentication, w3c_device_authentication,
+           issuer_authentication, verify_issuer_signed_item_digests},
     AuthenticationStatus, ResponseAuthenticationOutcome,
 };
 
@@ -614,6 +615,15 @@ impl SessionManager {
                 .insert("certificate_errors".to_string(), json!(validation_errors));
             validated_response.issuer_authentication = AuthenticationStatus::Invalid
         };
+
+        if let Err(e) = verify_issuer_signed_item_digests(&document.issuer_signed) {
+            validated_response.issuer_authentication = AuthenticationStatus::Invalid;
+            validated_response.errors.insert(
+                "digest_verification_errors".to_string(),
+                json!(vec![format!("{e:?}")]),
+            );
+        }
+
         validated_response
     }
 }

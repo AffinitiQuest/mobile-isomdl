@@ -6,7 +6,7 @@ use crate::definitions::device_response::W3cVcDocument;
 use crate::definitions::issuer_signed;
 use crate::definitions::x509::X5Chain;
 use crate::definitions::DeviceAuth;
-use crate::definitions::Mso;
+use crate::definitions::{Mso, DigestAlgorithm};
 use crate::definitions::{
     device_signed::{DeviceAuthentication, W3CDeviceAuthentication}, helpers::Tag24, SessionTranscript180135,
 };
@@ -153,6 +153,70 @@ pub fn issuer_authentication(x5chain: X5Chain, issuer_signed: &IssuerSigned) -> 
     verification_result
         .into_result()
         .map_err(Error::IssuerAuthentication)
+}
+
+/// Verifies that every issuer-signed item disclosed in `issuer_signed.namespaces`
+/// hashes to the digest the issuer committed to in the MSO's `value_digests`
+/// (ISO 18013-5 §9.1.2.5). `issuer_authentication` alone only proves the MSO bytes
+/// are validly signed; this closes the loop back to the actual disclosed values.
+pub fn verify_issuer_signed_item_digests(issuer_signed: &IssuerSigned) -> Result<(), Error> {
+    use sha2::{Digest, Sha256, Sha384, Sha512};
+
+    let Some(namespaces) = issuer_signed.namespaces.as_ref() else {
+        return Ok(());
+    };
+
+    let mso_bytes = issuer_signed
+        .issuer_auth
+        .payload
+        .as_ref()
+        .ok_or(Error::DetachedIssuerAuth)?;
+    let mso: Mso = cbor::from_slice::<Tag24<Mso>>(mso_bytes)
+        .map_err(|_| Error::MSOParsing)?
+        .into_inner();
+
+    let mut failures: Vec<String> = Vec::new();
+
+    for (namespace, items) in namespaces.iter() {
+        let digest_ids = mso.value_digests.get(namespace);
+        for item_bytes in items {
+            let item = item_bytes.as_ref();
+            match digest_ids.and_then(|ids| ids.get(&item.digest_id)) {
+                None => failures.push(format!(
+                    "{namespace}/{}: no digest commitment for digestID {:?}",
+                    item.element_identifier, item.digest_id
+                )),
+                Some(expected_digest) => {
+                    // Hash the full Tag24 (tag 24 + bstr header) encoding of the item,
+                    // matching issuance::mdoc::digest_namespace exactly — NOT the bare
+                    // IssuerSignedItem. Tag24's Serialize/Deserialize preserve the
+                    // original wire bytes verbatim, so this reproduces exactly what
+                    // the issuer hashed.
+                    let encoded = cbor::to_vec(item_bytes).map_err(|_| Error::CborDecodingError)?;
+                    let computed: Vec<u8> = match mso.digest_algorithm {
+                        DigestAlgorithm::SHA256 => Sha256::digest(&encoded).to_vec(),
+                        DigestAlgorithm::SHA384 => Sha384::digest(&encoded).to_vec(),
+                        DigestAlgorithm::SHA512 => Sha512::digest(&encoded).to_vec(),
+                    };
+                    if computed.as_slice() != expected_digest.as_ref() {
+                        failures.push(format!(
+                            "{namespace}/{}: digest mismatch for digestID {:?}",
+                            item.element_identifier, item.digest_id
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::MdocAuth(format!(
+            "issuer-signed item digest verification failed: {}",
+            failures.join("; ")
+        )))
+    }
 }
 
 pub fn w3c_device_authentication(

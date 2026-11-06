@@ -48,6 +48,14 @@ pub struct ResponseAuthenticationOutcome {
     /// the extension is absent or malformed, which is a normal, valid state (the
     /// extension is optional per RFC 5280), not an error.
     pub leaf_certificate_crl_distribution_point: Option<String>,
+    /// Serial number (hex-encoded) of the ICAO DPL device certificate leaf, extracted
+    /// from `deviceKeyInfo.keyInfo[-16721]` in the MSO payload. Only populated for
+    /// `int.icao.dpl.1` documents that carry an embedded device cert chain.
+    pub device_leaf_certificate_serial_number: Option<String>,
+    /// CRL distribution point URI from the DPL device certificate's own
+    /// CRLDistributionPoints extension, if present. Only populated for
+    /// `int.icao.dpl.1` documents that carry an embedded device cert chain.
+    pub device_leaf_certificate_crl_distribution_point: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]

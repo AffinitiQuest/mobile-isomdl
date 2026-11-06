@@ -36,7 +36,7 @@ use super::authentication::{
     AuthenticationStatus, ResponseAuthenticationOutcome,
 };
 
-use crate::definitions::x509;
+use crate::definitions::{Mso, x509};
 use crate::cose::sign1::PreparedCoseSign1;
 use crate::cose::SignatureAlgorithm;
 use crate::definitions::device_request::ReaderAuth;
@@ -49,6 +49,7 @@ use crate::{
         device_key::cose_key::Error as CoseError,
         device_request::{self, DeviceRequest, DocRequest, ItemsRequest},
         device_response::{Document, MdocDocument},
+        issuer_signed::IssuerSigned,
         helpers::{non_empty_vec, NonEmptyVec, Tag24},
         session::{
             self, create_p256_ephemeral_keys, derive_session_key, get_shared_secret, Handover,
@@ -566,6 +567,13 @@ impl SessionManager {
         log::info!("[validate_mdoc_response] signed_issuer_metadata present: {}", document.signed_issuer_metadata.is_some());
 
         let leaf_cert = x5chain.end_entity_certificate();
+        let (device_leaf_serial, device_leaf_cdp) = if document.doc_type == "int.icao.dpl.1" {
+            extract_dpl_device_cert_info(&document.issuer_signed)
+                .map(|(s, c)| (Some(s), c))
+                .unwrap_or((None, None))
+        } else {
+            (None, None)
+        };
         let mut validated_response = ResponseAuthenticationOutcome {
             response: namespaces,
             signed_issuer_metadata: document.signed_issuer_metadata.clone(),
@@ -573,6 +581,8 @@ impl SessionManager {
                 leaf_cert.tbs_certificate.serial_number.as_bytes(),
             )),
             leaf_certificate_crl_distribution_point: leaf_certificate_crl_distribution_point(leaf_cert),
+            device_leaf_certificate_serial_number: device_leaf_serial,
+            device_leaf_certificate_crl_distribution_point: device_leaf_cdp,
             ..Default::default()
         };
 
@@ -626,6 +636,40 @@ impl SessionManager {
 
         validated_response
     }
+}
+
+/// Extracts the serial number (hex) and CDP URL from the ICAO DPL device certificate
+/// embedded in the MSO's `deviceKeyInfo.keyInfo[-16721]`. Returns `None` if the document
+/// is not a DPL, the entry is absent, or the cert bytes cannot be parsed.
+fn extract_dpl_device_cert_info(issuer_signed: &IssuerSigned) -> Option<(String, Option<String>)> {
+    use der::Decode;
+
+    const DPL_DEVICE_CERT_KEY: i128 = -16721;
+
+    let mso_bytes = issuer_signed.issuer_auth.payload.as_ref()?;
+    let mso: Mso = cbor::from_slice::<Tag24<Mso>>(mso_bytes).ok()?.into_inner();
+
+    let key_info = mso.device_key_info.key_info.as_ref()?;
+    let cert_value = key_info.get(&DPL_DEVICE_CERT_KEY)?;
+
+    // Value is either a single bstr or an array of bstr; take the first element (leaf cert).
+    let cert_der: Vec<u8> = match cert_value {
+        ciborium::Value::Bytes(b) => b.clone(),
+        ciborium::Value::Array(arr) => {
+            if let Some(ciborium::Value::Bytes(b)) = arr.first() {
+                b.clone()
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+
+    let cert = x509_cert::Certificate::from_der(&cert_der).ok()?;
+    let serial = hex::encode(cert.tbs_certificate.serial_number.as_bytes());
+    let cdp = leaf_certificate_crl_distribution_point(&cert);
+
+    Some((serial, cdp))
 }
 
 /// Extracts the URI from a leaf certificate's own CRLDistributionPoints extension
